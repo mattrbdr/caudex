@@ -7,8 +7,8 @@ use tauri::{Manager, State};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-pub mod library;
 pub mod ingest;
+pub mod library;
 
 #[derive(Clone)]
 struct AppState {

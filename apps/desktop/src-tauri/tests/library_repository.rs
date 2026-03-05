@@ -49,31 +49,38 @@ async fn migrations_create_import_tables() {
         "import_job_items",
         "index_work_units",
     ] {
-        let exists: Option<(String,)> = sqlx::query_as(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
-        )
-        .bind(table)
-        .fetch_optional(&pool)
-        .await
-        .expect("table lookup should succeed");
+        let exists: Option<(String,)> =
+            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+                .bind(table)
+                .fetch_optional(&pool)
+                .await
+                .expect("table lookup should succeed");
 
         assert!(exists.is_some(), "{table} table should exist");
     }
 
     let import_jobs_columns: Vec<(String,)> =
         sqlx::query_as("SELECT name FROM pragma_table_info('import_jobs')")
-        .fetch_all(&pool)
-        .await
-        .expect("pragma should succeed");
-    let import_jobs_column_names: Vec<String> =
-        import_jobs_columns.into_iter().map(|(name,)| name).collect();
+            .fetch_all(&pool)
+            .await
+            .expect("pragma should succeed");
+    let import_jobs_column_names: Vec<String> = import_jobs_columns
+        .into_iter()
+        .map(|(name,)| name)
+        .collect();
     assert!(
-        import_jobs_column_names.iter().any(|name| name == "import_mode")
-            && import_jobs_column_names.iter().any(|name| name == "root_path")
+        import_jobs_column_names
+            .iter()
+            .any(|name| name == "import_mode")
+            && import_jobs_column_names
+                .iter()
+                .any(|name| name == "root_path")
             && import_jobs_column_names
                 .iter()
                 .any(|name| name == "duplicate_mode")
-            && import_jobs_column_names.iter().any(|name| name == "dry_run")
+            && import_jobs_column_names
+                .iter()
+                .any(|name| name == "dry_run")
             && import_jobs_column_names
                 .iter()
                 .any(|name| name == "scanned_count"),
@@ -201,5 +208,8 @@ async fn singleton_migration_deduplicates_legacy_rows_before_unique_index() {
         "2026-03-05T10:40:00Z",
     )
     .await;
-    assert!(second.is_err(), "singleton index should reject new second row");
+    assert!(
+        second.is_err(),
+        "singleton index should reject new second row"
+    );
 }

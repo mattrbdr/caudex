@@ -4,10 +4,12 @@ use sha2::{Digest, Sha256};
 use sqlx::{Error as SqlxError, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use walkdir::WalkDir;
+use zip::ZipArchive;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +127,8 @@ struct DedupeTracker {
     seen_precheck_keys: HashSet<String>,
     seen_sizes: HashSet<u64>,
     seen_hashes_by_size: HashMap<u64, HashSet<String>>,
+    seen_paths_by_size: HashMap<u64, Vec<String>>,
+    computed_hashes_by_path: HashMap<String, String>,
 }
 
 impl DedupeTracker {
@@ -135,14 +139,58 @@ impl DedupeTracker {
             .unwrap_or(false)
     }
 
-    fn track(&mut self, path_key: String, precheck_key: String, size: u64, content_hash: String) {
+    fn ensure_hashes_for_size(&mut self, size: u64) {
+        let Some(paths) = self.seen_paths_by_size.get(&size).cloned() else {
+            return;
+        };
+
+        for source_path in paths {
+            if self.computed_hashes_by_path.contains_key(&source_path) {
+                continue;
+            }
+
+            let bytes = match std::fs::read(&source_path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!("Unable to read prior file for dedupe hash precheck: {error}");
+                    continue;
+                }
+            };
+
+            let hash = sha256_hex(&bytes);
+            self.computed_hashes_by_path
+                .insert(source_path.clone(), hash.clone());
+            self.seen_hashes_by_size
+                .entry(size)
+                .or_default()
+                .insert(hash);
+        }
+    }
+
+    fn track(
+        &mut self,
+        path_key: String,
+        precheck_key: String,
+        size: u64,
+        source_path: String,
+        content_hash: Option<String>,
+    ) {
         self.seen_paths.insert(path_key);
         self.seen_precheck_keys.insert(precheck_key);
         self.seen_sizes.insert(size);
-        self.seen_hashes_by_size
+        self.seen_paths_by_size
             .entry(size)
             .or_default()
-            .insert(content_hash);
+            .push(source_path.clone());
+
+        if let Some(hash) = content_hash {
+            self.computed_hashes_by_path
+                .insert(source_path, hash.clone());
+            self.seen_hashes_by_size
+                .entry(size)
+                .or_default()
+                .insert(hash);
+        }
     }
 }
 
@@ -166,15 +214,13 @@ fn report_internal_error(context: &str, error: &dyn Display, user_message: &str)
 }
 
 fn now_utc_rfc3339() -> Result<String, String> {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .map_err(|error| {
-            report_internal_error(
-                "Unable to format timestamp",
-                &error,
-                "Unable to process import at this time.",
-            )
-        })
+    OffsetDateTime::now_utc().format(&Rfc3339).map_err(|error| {
+        report_internal_error(
+            "Unable to format timestamp",
+            &error,
+            "Unable to process import at this time.",
+        )
+    })
 }
 
 fn is_unique_constraint_error(error: &SqlxError) -> bool {
@@ -252,7 +298,15 @@ fn parse_pdf(path: &Path, bytes: &[u8]) -> Result<ParsedMetadata, String> {
         return Err("File appears to be corrupted or unreadable PDF.".to_string());
     }
 
-    let _ = Document::load_mem(bytes);
+    if Document::load_mem(bytes).is_err() {
+        // Some producer outputs still carry broken xref tables; keep a strict fallback
+        // that requires core PDF markers before treating the document as readable.
+        let has_xref = bytes.windows(4).any(|window| window == b"xref");
+        let has_eof = bytes.windows(5).any(|window| window == b"%%EOF");
+        if !has_xref || !has_eof {
+            return Err("File appears to be corrupted or unreadable PDF.".to_string());
+        }
+    }
 
     Ok(ParsedMetadata {
         title: title_from_path(path),
@@ -264,6 +318,27 @@ fn parse_pdf(path: &Path, bytes: &[u8]) -> Result<ParsedMetadata, String> {
 
 fn parse_epub(path: &Path, bytes: &[u8]) -> Result<ParsedMetadata, String> {
     if !bytes.starts_with(b"PK\x03\x04") {
+        return Err("File appears to be corrupted or unreadable EPUB.".to_string());
+    }
+
+    let mut archive = ZipArchive::new(Cursor::new(bytes))
+        .map_err(|_| "File appears to be corrupted or unreadable EPUB.".to_string())?;
+    let mut is_epub_archive = false;
+
+    if let Ok(mut mimetype) = archive.by_name("mimetype") {
+        let mut mime_value = String::new();
+        if mimetype.read_to_string(&mut mime_value).is_ok()
+            && mime_value.trim() == "application/epub+zip"
+        {
+            is_epub_archive = true;
+        }
+    }
+
+    if !is_epub_archive && archive.by_name("META-INF/container.xml").is_ok() {
+        is_epub_archive = true;
+    }
+
+    if !is_epub_archive {
         return Err("File appears to be corrupted or unreadable EPUB.".to_string());
     }
 
@@ -311,7 +386,197 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{digest:x}")
 }
 
-fn make_failed_result(source_path: String, error_code: &str, error_message: String) -> ImportFileResult {
+#[derive(sqlx::FromRow)]
+struct LibraryItemMetadataRow {
+    id: i64,
+    title: String,
+    authors: String,
+    language: Option<String>,
+    published_at: Option<String>,
+}
+
+fn is_placeholder_title(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("untitled")
+}
+
+fn merge_title(existing: &str, incoming: &str) -> String {
+    if is_placeholder_title(existing) && !is_placeholder_title(incoming) {
+        return incoming.trim().to_string();
+    }
+
+    if !is_placeholder_title(incoming) && incoming.trim().len() > existing.trim().len() {
+        return incoming.trim().to_string();
+    }
+
+    existing.to_string()
+}
+
+fn merge_authors(existing: &[String], incoming: &[String]) -> Vec<String> {
+    let mut merged = Vec::new();
+
+    for author in existing.iter().chain(incoming.iter()) {
+        let normalized = author.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        if merged
+            .iter()
+            .any(|value: &String| value.eq_ignore_ascii_case(normalized))
+        {
+            continue;
+        }
+        merged.push(normalized.to_string());
+    }
+
+    merged
+}
+
+async fn find_existing_item_id_by_content_hash(
+    pool: &SqlitePool,
+    library_id: i64,
+    content_hash: &str,
+) -> Result<Option<i64>, String> {
+    sqlx::query_scalar(
+        r#"
+        SELECT iji.library_item_id
+        FROM import_job_items iji
+        JOIN library_items li ON li.id = iji.library_item_id
+        WHERE li.library_id = ?
+          AND iji.content_hash = ?
+          AND iji.library_item_id IS NOT NULL
+        ORDER BY iji.id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(library_id)
+    .bind(content_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        report_internal_error(
+            "Unable to resolve duplicate content target",
+            &error,
+            "Unable to process duplicate metadata merge.",
+        )
+    })
+}
+
+async fn find_existing_item_by_source_path(
+    pool: &SqlitePool,
+    library_id: i64,
+    source_path: &str,
+) -> Result<Option<i64>, String> {
+    sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM library_items
+        WHERE library_id = ? AND source_path = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(library_id)
+    .bind(source_path)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        report_internal_error(
+            "Unable to resolve duplicate source path target",
+            &error,
+            "Unable to process duplicate metadata merge.",
+        )
+    })
+}
+
+async fn merge_library_item_metadata(
+    pool: &SqlitePool,
+    library_id: i64,
+    item_id: i64,
+    incoming: &ParsedMetadata,
+) -> Result<bool, String> {
+    let current = sqlx::query_as::<_, LibraryItemMetadataRow>(
+        r#"
+        SELECT id, title, authors, language, published_at
+        FROM library_items
+        WHERE id = ? AND library_id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(item_id)
+    .bind(library_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        report_internal_error(
+            "Unable to load library item for metadata merge",
+            &error,
+            "Unable to process duplicate metadata merge.",
+        )
+    })?;
+
+    let Some(current) = current else {
+        return Ok(false);
+    };
+
+    let existing_authors: Vec<String> = serde_json::from_str(&current.authors).unwrap_or_default();
+    let merged_title = merge_title(&current.title, &incoming.title);
+    let merged_authors = merge_authors(&existing_authors, &incoming.authors);
+    let merged_language = current
+        .language
+        .clone()
+        .or_else(|| incoming.language.clone());
+    let merged_published_at = current
+        .published_at
+        .clone()
+        .or_else(|| incoming.published_at.clone());
+
+    let merged_authors_json = serde_json::to_string(&merged_authors).map_err(|error| {
+        report_internal_error(
+            "Unable to serialize merged author metadata",
+            &error,
+            "Unable to process duplicate metadata merge.",
+        )
+    })?;
+
+    let has_changes = merged_title != current.title
+        || merged_authors_json != current.authors
+        || merged_language != current.language
+        || merged_published_at != current.published_at;
+
+    if !has_changes {
+        return Ok(false);
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE library_items
+        SET title = ?, authors = ?, language = ?, published_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&merged_title)
+    .bind(&merged_authors_json)
+    .bind(&merged_language)
+    .bind(&merged_published_at)
+    .bind(current.id)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        report_internal_error(
+            "Unable to merge duplicate metadata into existing item",
+            &error,
+            "Unable to process duplicate metadata merge.",
+        )
+    })?;
+
+    Ok(true)
+}
+
+fn make_failed_result(
+    source_path: String,
+    error_code: &str,
+    error_message: String,
+) -> ImportFileResult {
     ImportFileResult {
         source_path,
         status: ImportFileStatus::Failed,
@@ -495,7 +760,11 @@ async fn process_one_file(
             )
             .await?;
 
-            return Ok(make_failed_result(raw_path.to_string(), "invalid_path", message));
+            return Ok(make_failed_result(
+                raw_path.to_string(),
+                "invalid_path",
+                message,
+            ));
         }
     };
 
@@ -593,7 +862,11 @@ async fn process_one_file(
             )
             .await?;
 
-            return Ok(make_failed_result(source_path, "unsupported_format", message));
+            return Ok(make_failed_result(
+                source_path,
+                "unsupported_format",
+                message,
+            ));
         }
     };
 
@@ -632,14 +905,22 @@ async fn process_one_file(
 
     let size = file_bytes.len() as u64;
     let precheck_key = build_precheck_key(&canonical_or_absolute, size);
-    let content_hash = sha256_hex(&file_bytes);
-
     let is_duplicate_candidate =
         tracker.seen_precheck_keys.contains(&precheck_key) || tracker.seen_sizes.contains(&size);
-    let duplicate_content = is_duplicate_candidate && tracker.has_duplicate_hash(size, &content_hash);
+    let mut content_hash: Option<String> = None;
+    let mut duplicate_content = false;
+
+    if is_duplicate_candidate || duplicate_mode == BulkDuplicateMode::MergeMetadata {
+        // Precheck keeps hashing focused on likely duplicates; prior same-size files are hashed lazily.
+        tracker.ensure_hashes_for_size(size);
+        let current_hash = sha256_hex(&file_bytes);
+        duplicate_content = tracker.has_duplicate_hash(size, &current_hash);
+        content_hash = Some(current_hash);
+    }
 
     let mut dedupe_decision: Option<&str> = None;
     if duplicate_content {
+        let content_hash_ref = content_hash.as_deref();
         match duplicate_mode {
             BulkDuplicateMode::SkipDuplicate => {
                 let message = "Duplicate content detected and skipped.".to_string();
@@ -654,14 +935,20 @@ async fn process_one_file(
                     None,
                     None,
                     Some(&precheck_key),
-                    Some(&content_hash),
+                    content_hash_ref,
                     Some("skip_duplicate"),
                     &queued_at,
                     Some(&completed_at),
                 )
                 .await?;
 
-                tracker.track(path_key, precheck_key, size, content_hash);
+                tracker.track(
+                    path_key,
+                    precheck_key,
+                    size,
+                    source_path.clone(),
+                    content_hash,
+                );
 
                 return Ok(ImportFileResult {
                     source_path,
@@ -679,7 +966,107 @@ async fn process_one_file(
                 });
             }
             BulkDuplicateMode::MergeMetadata => {
-                let message = "Duplicate content detected and metadata merge was requested.".to_string();
+                if dry_run {
+                    let message =
+                        "Duplicate content detected; metadata merge skipped in dry-run mode."
+                            .to_string();
+                    persist_import_job_item(
+                        pool,
+                        job_id,
+                        &source_path,
+                        Some(detected_format),
+                        &ImportFileStatus::Skipped,
+                        Some("duplicate_content"),
+                        Some(&message),
+                        None,
+                        None,
+                        Some(&precheck_key),
+                        content_hash_ref,
+                        Some("merge_metadata"),
+                        &queued_at,
+                        Some(&completed_at),
+                    )
+                    .await?;
+
+                    tracker.track(
+                        path_key,
+                        precheck_key,
+                        size,
+                        source_path.clone(),
+                        content_hash,
+                    );
+
+                    return Ok(ImportFileResult {
+                        source_path,
+                        status: ImportFileStatus::Skipped,
+                        format: Some(detected_format),
+                        title: Some(metadata.title),
+                        authors: metadata.authors,
+                        language: metadata.language,
+                        published_at: metadata.published_at,
+                        item_id: None,
+                        index_work_unit_id: None,
+                        error_code: Some("duplicate_content".to_string()),
+                        error_message: Some(message),
+                        dedupe_decision: Some("merge_metadata".to_string()),
+                    });
+                }
+
+                let existing_item_id = if let Some(hash) = content_hash_ref {
+                    find_existing_item_id_by_content_hash(pool, library_id, hash).await?
+                } else {
+                    None
+                };
+
+                if let Some(existing_item_id) = existing_item_id {
+                    let _ =
+                        merge_library_item_metadata(pool, library_id, existing_item_id, &metadata)
+                            .await?;
+                    persist_import_job_item(
+                        pool,
+                        job_id,
+                        &source_path,
+                        Some(detected_format),
+                        &ImportFileStatus::Success,
+                        None,
+                        None,
+                        Some(existing_item_id),
+                        None,
+                        Some(&precheck_key),
+                        content_hash_ref,
+                        Some("merge_metadata"),
+                        &queued_at,
+                        Some(&completed_at),
+                    )
+                    .await?;
+
+                    tracker.track(
+                        path_key,
+                        precheck_key,
+                        size,
+                        source_path.clone(),
+                        content_hash,
+                    );
+
+                    return Ok(ImportFileResult {
+                        source_path,
+                        status: ImportFileStatus::Success,
+                        format: Some(detected_format),
+                        title: Some(metadata.title),
+                        authors: metadata.authors,
+                        language: metadata.language,
+                        published_at: metadata.published_at,
+                        item_id: Some(existing_item_id),
+                        index_work_unit_id: None,
+                        error_code: None,
+                        error_message: None,
+                        dedupe_decision: Some("merge_metadata".to_string()),
+                    });
+                }
+
+                let message =
+                    "Duplicate content detected but no existing item was found for metadata merge."
+                        .to_string();
                 persist_import_job_item(
                     pool,
                     job_id,
@@ -691,14 +1078,20 @@ async fn process_one_file(
                     None,
                     None,
                     Some(&precheck_key),
-                    Some(&content_hash),
+                    content_hash_ref,
                     Some("merge_metadata"),
                     &queued_at,
                     Some(&completed_at),
                 )
                 .await?;
 
-                tracker.track(path_key, precheck_key, size, content_hash);
+                tracker.track(
+                    path_key,
+                    precheck_key,
+                    size,
+                    source_path.clone(),
+                    content_hash,
+                );
 
                 return Ok(ImportFileResult {
                     source_path,
@@ -763,6 +1156,60 @@ async fn process_one_file(
         let inserted_item_id = match insert_item {
             Ok(result) => result.last_insert_rowid(),
             Err(error) if is_unique_constraint_error(&error) => {
+                if duplicate_mode == BulkDuplicateMode::MergeMetadata {
+                    if let Some(existing_item_id) =
+                        find_existing_item_by_source_path(pool, library_id, &source_path).await?
+                    {
+                        let _ = merge_library_item_metadata(
+                            pool,
+                            library_id,
+                            existing_item_id,
+                            &metadata,
+                        )
+                        .await?;
+                        persist_import_job_item(
+                            pool,
+                            job_id,
+                            &source_path,
+                            Some(detected_format),
+                            &ImportFileStatus::Success,
+                            None,
+                            None,
+                            Some(existing_item_id),
+                            None,
+                            Some(&precheck_key),
+                            content_hash.as_deref(),
+                            Some("merge_metadata"),
+                            &queued_at,
+                            Some(&completed_at),
+                        )
+                        .await?;
+
+                        tracker.track(
+                            path_key,
+                            precheck_key,
+                            size,
+                            source_path.clone(),
+                            content_hash,
+                        );
+
+                        return Ok(ImportFileResult {
+                            source_path,
+                            status: ImportFileStatus::Success,
+                            format: Some(detected_format),
+                            title: Some(metadata.title),
+                            authors: metadata.authors,
+                            language: metadata.language,
+                            published_at: metadata.published_at,
+                            item_id: Some(existing_item_id),
+                            index_work_unit_id: None,
+                            error_code: None,
+                            error_message: None,
+                            dedupe_decision: Some("merge_metadata".to_string()),
+                        });
+                    }
+                }
+
                 let message = "File already imported in this library.".to_string();
                 persist_import_job_item(
                     pool,
@@ -775,14 +1222,20 @@ async fn process_one_file(
                     None,
                     None,
                     Some(&precheck_key),
-                    Some(&content_hash),
+                    content_hash.as_deref(),
                     Some("skip_duplicate"),
                     &queued_at,
                     Some(&completed_at),
                 )
                 .await?;
 
-                tracker.track(path_key, precheck_key, size, content_hash);
+                tracker.track(
+                    path_key,
+                    precheck_key,
+                    size,
+                    source_path.clone(),
+                    content_hash,
+                );
 
                 return Ok(ImportFileResult {
                     source_path,
@@ -837,7 +1290,13 @@ async fn process_one_file(
         index_work_unit_id = Some(index_id);
     }
 
-    tracker.track(path_key, precheck_key.clone(), size, content_hash.clone());
+    tracker.track(
+        path_key,
+        precheck_key.clone(),
+        size,
+        source_path.clone(),
+        content_hash.clone(),
+    );
 
     persist_import_job_item(
         pool,
@@ -850,7 +1309,7 @@ async fn process_one_file(
         item_id,
         index_work_unit_id,
         Some(&precheck_key),
-        Some(&content_hash),
+        content_hash.as_deref(),
         dedupe_decision,
         &queued_at,
         Some(&completed_at),

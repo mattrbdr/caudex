@@ -4,6 +4,7 @@ use appsdesktop_lib::ingest::{
 };
 use appsdesktop_lib::library::{insert_library, run_migrations};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -36,9 +37,29 @@ fn write_pdf_with_tag(path: &std::path::Path, tag: &str) {
 }
 
 fn write_epub(path: &std::path::Path) {
-    // Minimal ZIP local header signature + extension fallback used by parser path.
-    std::fs::write(path, b"PK\x03\x04minimal-epub-fixture")
-        .expect("epub fixture should be created");
+    let file = std::fs::File::create(path).expect("epub fixture should be created");
+    let mut archive = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    archive
+        .start_file("mimetype", options)
+        .expect("mimetype entry should be created");
+    archive
+        .write_all(b"application/epub+zip")
+        .expect("mimetype value should be written");
+    archive
+        .add_directory("META-INF/", options)
+        .expect("meta-inf folder should be created");
+    archive
+        .start_file("META-INF/container.xml", options)
+        .expect("container entry should be created");
+    archive
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles/></container>"#,
+        )
+        .expect("container payload should be written");
+    archive.finish().expect("epub archive should finalize");
 }
 
 fn write_mobi(path: &std::path::Path) {
@@ -87,12 +108,10 @@ async fn start_import_ingests_supported_formats_and_queues_index_work() {
     assert_eq!(result.success_count, 3);
     assert_eq!(result.failed_count, 0);
     assert_eq!(result.skipped_count, 0);
-    assert!(
-        result
-            .items
-            .iter()
-            .all(|item| item.status == ImportFileStatus::Success)
-    );
+    assert!(result
+        .items
+        .iter()
+        .all(|item| item.status == ImportFileStatus::Success));
 
     let item_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM library_items")
         .fetch_one(&pool)
@@ -147,19 +166,59 @@ async fn start_import_flags_unsupported_or_corrupt_without_blocking_successes() 
 
     assert_eq!(result.success_count, 1);
     assert_eq!(result.failed_count, 2);
-    assert!(
-        result
-            .items
-            .iter()
-            .any(|item| item.status == ImportFileStatus::Success)
-    );
-    assert!(
-        result
-            .items
-            .iter()
-            .filter(|item| item.status == ImportFileStatus::Failed)
-            .all(|item| item.error_message.is_some())
-    );
+    assert!(result
+        .items
+        .iter()
+        .any(|item| item.status == ImportFileStatus::Success));
+    assert!(result
+        .items
+        .iter()
+        .filter(|item| item.status == ImportFileStatus::Failed)
+        .all(|item| item.error_message.is_some()));
+}
+
+#[tokio::test]
+async fn start_import_rejects_corrupt_epub_payload() {
+    let temp = tempdir().expect("temp dir should be created");
+    let pool = setup_pool(temp.path().join("caudex.db")).await;
+    run_migrations(&pool)
+        .await
+        .expect("migrations should apply");
+
+    insert_library(
+        &pool,
+        "Main Library",
+        temp.path().to_string_lossy().as_ref(),
+        "2026-03-05T10:30:00Z",
+    )
+    .await
+    .expect("library insert should succeed");
+
+    let valid_mobi = temp.path().join("ok.mobi");
+    let corrupt_epub = temp.path().join("bad.epub");
+    write_mobi(&valid_mobi);
+    std::fs::write(&corrupt_epub, b"PK\x03\x04not-really-an-epub")
+        .expect("corrupt epub fixture should be created");
+
+    let result = start_import_with_pool(
+        StartImportInput {
+            paths: vec![
+                valid_mobi.to_string_lossy().to_string(),
+                corrupt_epub.to_string_lossy().to_string(),
+            ],
+        },
+        &pool,
+    )
+    .await
+    .expect("import should complete with partial failures");
+
+    assert_eq!(result.success_count, 1);
+    assert_eq!(result.failed_count, 1);
+    assert!(result.items.iter().any(|item| {
+        item.source_path.ends_with("bad.epub")
+            && item.status == ImportFileStatus::Failed
+            && item.error_code.as_deref() == Some("corrupt_file")
+    }));
 }
 
 #[tokio::test]
@@ -194,12 +253,10 @@ async fn start_import_skips_duplicate_paths_in_same_request() {
 
     assert_eq!(result.success_count, 1);
     assert_eq!(result.skipped_count, 1);
-    assert!(
-        result
-            .items
-            .iter()
-            .any(|item| item.status == ImportFileStatus::Skipped)
-    );
+    assert!(result
+        .items
+        .iter()
+        .any(|item| item.status == ImportFileStatus::Skipped));
 }
 
 #[tokio::test]
@@ -295,6 +352,61 @@ async fn bulk_import_force_import_keeps_same_content_different_name() {
         item.status == ImportFileStatus::Success
             && item.dedupe_decision.as_deref() == Some("force_import")
     }));
+}
+
+#[tokio::test]
+async fn bulk_import_merge_metadata_updates_existing_item() {
+    let temp = tempdir().expect("temp dir should be created");
+    let pool = setup_pool(temp.path().join("caudex.db")).await;
+    run_migrations(&pool)
+        .await
+        .expect("migrations should apply");
+
+    insert_library(
+        &pool,
+        "Main Library",
+        temp.path().to_string_lossy().as_ref(),
+        "2026-03-05T10:30:00Z",
+    )
+    .await
+    .expect("library insert should succeed");
+
+    let root = temp.path().join("bulk-merge");
+    std::fs::create_dir_all(&root).expect("directory should be created");
+    let short_name = root.join("a.pdf");
+    let long_name = root.join("very-descriptive-title.pdf");
+    write_pdf(&short_name);
+    std::fs::copy(&short_name, &long_name).expect("duplicate content fixture should be copied");
+
+    let result = start_bulk_import_with_pool(
+        StartBulkImportInput {
+            root_path: root.to_string_lossy().to_string(),
+            duplicate_mode: BulkDuplicateMode::MergeMetadata,
+            dry_run: false,
+        },
+        &pool,
+    )
+    .await
+    .expect("bulk import should complete");
+
+    assert_eq!(result.success_count, 2);
+    assert_eq!(result.skipped_count, 0);
+    assert!(result.items.iter().any(|item| {
+        item.status == ImportFileStatus::Success
+            && item.dedupe_decision.as_deref() == Some("merge_metadata")
+    }));
+
+    let item_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM library_items")
+        .fetch_one(&pool)
+        .await
+        .expect("count query should succeed");
+    assert_eq!(item_count, 1);
+
+    let title: String = sqlx::query_scalar("SELECT title FROM library_items LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("title query should succeed");
+    assert_eq!(title, "very-descriptive-title");
 }
 
 #[tokio::test]
