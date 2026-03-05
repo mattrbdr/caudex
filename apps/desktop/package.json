@@ -1,5 +1,5 @@
 {
-  "name": "appsdesktop",
+  "name": "caudex",
   "version": "0.1.0",
   "description": "",
   "type": "module",
@@ -10,7 +10,14 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "test": "vitest run",
+    "test:smoke": "vitest run src/routes/smoke.test.ts",
+    "test:smoke:report": "vitest run src/routes/smoke.test.ts --reporter=json --outputFile benchmarks/smoke-report.json",
     "test:watch": "vitest",
+    "bench:run": "node scripts/run-benchmarks.mjs",
+    "bench:gate": "node scripts/check-quality-gates.mjs",
+    "ci:repro:prepare": "node scripts/prepare-repro-artifacts.mjs",
+    "ci:checksums:generate": "node scripts/checksum-artifacts.mjs generate",
+    "ci:checksums:verify": "node scripts/checksum-artifacts.mjs verify",
     "tauri": "tauri"
   },
   "license": "MIT",

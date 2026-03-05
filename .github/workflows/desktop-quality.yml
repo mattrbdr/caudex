@@ -1,0 +1,143 @@
+name: Desktop Quality Gates
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/desktop-quality.yml"
+      - "apps/desktop/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/desktop-quality.yml"
+      - "apps/desktop/**"
+
+jobs:
+  quality:
+    name: quality-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os:
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            ~/AppData/Local/bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('apps/desktop/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/desktop/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+
+      - name: Frontend type and lint checks
+        working-directory: apps/desktop
+        run: bun run check
+
+      - name: Frontend tests
+        working-directory: apps/desktop
+        run: bun run test
+
+      - name: Smoke startup test (with benchmark report)
+        working-directory: apps/desktop
+        run: bun run test:smoke:report
+
+      - name: Backend tests
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --all-targets -q
+
+      - name: Generate benchmark metrics
+        working-directory: apps/desktop
+        run: bun run bench:run benchmarks/latest.json benchmarks/smoke-report.json
+
+      - name: Enforce benchmark thresholds
+        working-directory: apps/desktop
+        run: bun run bench:gate benchmarks/latest.json
+
+      - name: Build frontend release artifact
+        working-directory: apps/desktop
+        run: bun run build
+
+      - name: Build backend release artifact
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --release
+
+      - name: Prepare reproducibility artifacts
+        working-directory: apps/desktop
+        run: bun run ci:repro:prepare ../../artifacts/reproducibility
+
+      - name: Generate checksums
+        run: |
+          node apps/desktop/scripts/checksum-artifacts.mjs generate \
+            artifacts/reproducibility/checksums.sha256 \
+            artifacts/reproducibility/package.json \
+            artifacts/reproducibility/bun.lock \
+            artifacts/reproducibility/Cargo.lock \
+            artifacts/reproducibility/frontend-index.html \
+            artifacts/reproducibility/backend-binary
+
+      - name: Verify checksums
+        run: node apps/desktop/scripts/checksum-artifacts.mjs verify artifacts/reproducibility/checksums.sha256
+
+      - name: Upload quality artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-quality-${{ matrix.os }}
+          path: |
+            apps/desktop/benchmarks/latest.json
+            apps/desktop/benchmarks/smoke-report.json
+            artifacts/reproducibility/**
+
+  verify-integrity:
+    name: verify-integrity
+    runs-on: ubuntu-latest
+    needs:
+      - quality
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download quality artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+          pattern: desktop-quality-*
+
+      - name: Verify all checksum manifests
+        shell: bash
+        run: |
+          manifests=$(find downloaded -name checksums.sha256 -type f)
+          if [ -z "$manifests" ]; then
+            echo "No checksum manifests found."
+            exit 1
+          fi
+
+          while IFS= read -r manifest; do
+            node apps/desktop/scripts/checksum-artifacts.mjs verify "$manifest"
+          done <<< "$manifests"

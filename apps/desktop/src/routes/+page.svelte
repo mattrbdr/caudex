@@ -10,7 +10,7 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import { Label } from "$lib/components/ui/label/index.js";
   import { invoke } from "@tauri-apps/api/core";
-  import { documentDir, join } from "@tauri-apps/api/path";
+  import { documentDir, homeDir, join } from "@tauri-apps/api/path";
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
 
@@ -38,7 +38,13 @@
       const docsDir = await documentDir();
       libraryPath = await join(docsDir, "Caudex");
     } catch {
-      libraryPath = "~/Documents/Caudex";
+      try {
+        const home = await homeDir();
+        libraryPath = await join(home, "Documents", "Caudex");
+      } catch {
+        libraryPath =
+          navigator.userAgent.includes("Windows") ? "C:\\Caudex" : "/tmp/Caudex";
+      }
     }
   }
 
