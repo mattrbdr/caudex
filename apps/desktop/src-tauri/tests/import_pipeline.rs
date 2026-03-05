@@ -1,6 +1,7 @@
 use appsdesktop_lib::ingest::{
-    start_bulk_import_with_pool, start_import_with_pool, BulkDuplicateMode, ImportFileStatus,
-    StartBulkImportInput, StartImportInput,
+    get_import_job_result_with_pool, start_bulk_import_with_pool, start_import_retry_with_pool,
+    start_import_with_pool, BulkDuplicateMode, ImportFileStatus, StartBulkImportInput,
+    StartImportInput, StartImportRetryInput,
 };
 use appsdesktop_lib::library::{insert_library, run_migrations};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -493,4 +494,322 @@ async fn bulk_import_reports_scan_counts_for_medium_tree() {
 
     assert_eq!(result.scanned_count, 120);
     assert_eq!(result.processed_count, 120);
+}
+
+#[tokio::test]
+async fn get_import_job_result_loads_latest_job_when_job_id_is_omitted() {
+    let temp = tempdir().expect("temp dir should be created");
+    let pool = setup_pool(temp.path().join("caudex.db")).await;
+    run_migrations(&pool)
+        .await
+        .expect("migrations should apply");
+
+    insert_library(
+        &pool,
+        "Main Library",
+        temp.path().to_string_lossy().as_ref(),
+        "2026-03-05T10:30:00Z",
+    )
+    .await
+    .expect("library insert should succeed");
+
+    let ok = temp.path().join("ok.pdf");
+    let bad = temp.path().join("bad.txt");
+    write_pdf(&ok);
+    std::fs::write(&bad, b"bad").expect("fixture should be created");
+
+    let import = start_import_with_pool(
+        StartImportInput {
+            paths: vec![ok.to_string_lossy().to_string(), bad.to_string_lossy().to_string()],
+        },
+        &pool,
+    )
+    .await
+    .expect("import should complete");
+
+    let loaded = get_import_job_result_with_pool(None, &pool)
+        .await
+        .expect("latest import job should be loaded");
+
+    assert_eq!(loaded.job_id, import.job_id);
+    assert_eq!(loaded.success_count, 1);
+    assert_eq!(loaded.failed_count, 1);
+}
+
+#[tokio::test]
+async fn retry_reprocesses_only_failed_items_from_source_job() {
+    let temp = tempdir().expect("temp dir should be created");
+    let pool = setup_pool(temp.path().join("caudex.db")).await;
+    run_migrations(&pool)
+        .await
+        .expect("migrations should apply");
+
+    insert_library(
+        &pool,
+        "Main Library",
+        temp.path().to_string_lossy().as_ref(),
+        "2026-03-05T10:30:00Z",
+    )
+    .await
+    .expect("library insert should succeed");
+
+    let ok = temp.path().join("ok.epub");
+    let bad = temp.path().join("retry-me.txt");
+    write_epub(&ok);
+    std::fs::write(&bad, b"unsupported").expect("fixture should be created");
+
+    let first = start_import_with_pool(
+        StartImportInput {
+            paths: vec![ok.to_string_lossy().to_string(), bad.to_string_lossy().to_string()],
+        },
+        &pool,
+    )
+    .await
+    .expect("import should complete");
+
+    write_pdf(&bad);
+
+    let retried = start_import_retry_with_pool(
+        StartImportRetryInput {
+            job_id: first.job_id,
+            source_paths: None,
+        },
+        &pool,
+    )
+    .await
+    .expect("retry should run");
+
+    assert_eq!(retried.processed_count, 1);
+    assert_eq!(retried.success_count, 1);
+    assert!(
+        retried
+            .items
+            .iter()
+            .all(|item| item.source_path.ends_with("retry-me.txt"))
+    );
+
+    let retry_source: Option<i64> = sqlx::query_scalar(
+        "SELECT retry_source_job_id FROM import_jobs WHERE id = ?",
+    )
+    .bind(retried.job_id)
+    .fetch_one(&pool)
+    .await
+    .expect("retry source should be queryable");
+    assert_eq!(retry_source, Some(first.job_id));
+}
+
+#[tokio::test]
+async fn retry_selected_subset_only_retries_requested_failed_paths() {
+    let temp = tempdir().expect("temp dir should be created");
+    let pool = setup_pool(temp.path().join("caudex.db")).await;
+    run_migrations(&pool)
+        .await
+        .expect("migrations should apply");
+
+    insert_library(
+        &pool,
+        "Main Library",
+        temp.path().to_string_lossy().as_ref(),
+        "2026-03-05T10:30:00Z",
+    )
+    .await
+    .expect("library insert should succeed");
+
+    let ok = temp.path().join("ok.epub");
+    let bad_a = temp.path().join("bad-a.txt");
+    let bad_b = temp.path().join("bad-b.txt");
+    write_epub(&ok);
+    std::fs::write(&bad_a, b"unsupported-a").expect("fixture should be created");
+    std::fs::write(&bad_b, b"unsupported-b").expect("fixture should be created");
+
+    let first = start_import_with_pool(
+        StartImportInput {
+            paths: vec![
+                ok.to_string_lossy().to_string(),
+                bad_a.to_string_lossy().to_string(),
+                bad_b.to_string_lossy().to_string(),
+            ],
+        },
+        &pool,
+    )
+    .await
+    .expect("import should complete");
+
+    write_pdf(&bad_a);
+
+    let retried = start_import_retry_with_pool(
+        StartImportRetryInput {
+            job_id: first.job_id,
+            source_paths: Some(vec![bad_a.to_string_lossy().to_string()]),
+        },
+        &pool,
+    )
+    .await
+    .expect("retry should run");
+
+    assert_eq!(retried.processed_count, 1);
+    assert_eq!(retried.success_count, 1);
+    assert!(
+        retried
+            .items
+            .iter()
+            .all(|item| item.source_path.ends_with("bad-a.txt"))
+    );
+}
+
+#[tokio::test]
+async fn retry_fails_when_source_job_has_no_failed_items() {
+    let temp = tempdir().expect("temp dir should be created");
+    let pool = setup_pool(temp.path().join("caudex.db")).await;
+    run_migrations(&pool)
+        .await
+        .expect("migrations should apply");
+
+    insert_library(
+        &pool,
+        "Main Library",
+        temp.path().to_string_lossy().as_ref(),
+        "2026-03-05T10:30:00Z",
+    )
+    .await
+    .expect("library insert should succeed");
+
+    let ok = temp.path().join("ok.pdf");
+    write_pdf(&ok);
+
+    let first = start_import_with_pool(
+        StartImportInput {
+            paths: vec![ok.to_string_lossy().to_string()],
+        },
+        &pool,
+    )
+    .await
+    .expect("import should complete");
+
+    let retry = start_import_retry_with_pool(
+        StartImportRetryInput {
+            job_id: first.job_id,
+            source_paths: None,
+        },
+        &pool,
+    )
+    .await;
+
+    assert!(
+        retry
+            .expect_err("retry should fail without failed items")
+            .contains("No failed items")
+    );
+}
+
+#[tokio::test]
+async fn retry_rejects_selection_with_non_failed_path() {
+    let temp = tempdir().expect("temp dir should be created");
+    let pool = setup_pool(temp.path().join("caudex.db")).await;
+    run_migrations(&pool)
+        .await
+        .expect("migrations should apply");
+
+    insert_library(
+        &pool,
+        "Main Library",
+        temp.path().to_string_lossy().as_ref(),
+        "2026-03-05T10:30:00Z",
+    )
+    .await
+    .expect("library insert should succeed");
+
+    let ok = temp.path().join("ok.epub");
+    let bad = temp.path().join("bad.txt");
+    write_epub(&ok);
+    std::fs::write(&bad, b"unsupported").expect("fixture should be created");
+
+    let first = start_import_with_pool(
+        StartImportInput {
+            paths: vec![ok.to_string_lossy().to_string(), bad.to_string_lossy().to_string()],
+        },
+        &pool,
+    )
+    .await
+    .expect("import should complete");
+
+    let retry = start_import_retry_with_pool(
+        StartImportRetryInput {
+            job_id: first.job_id,
+            source_paths: Some(vec![
+                bad.to_string_lossy().to_string(),
+                temp.path()
+                    .join("not-from-job.pdf")
+                    .to_string_lossy()
+                    .to_string(),
+            ]),
+        },
+        &pool,
+    )
+    .await;
+
+    assert!(
+        retry
+            .expect_err("retry should reject ambiguous selections")
+            .contains("not failed in source job")
+    );
+}
+
+#[tokio::test]
+async fn retry_after_duplicate_existing_returns_skipped_duplicate_existing() {
+    let temp = tempdir().expect("temp dir should be created");
+    let pool = setup_pool(temp.path().join("caudex.db")).await;
+    run_migrations(&pool)
+        .await
+        .expect("migrations should apply");
+
+    insert_library(
+        &pool,
+        "Main Library",
+        temp.path().to_string_lossy().as_ref(),
+        "2026-03-05T10:30:00Z",
+    )
+    .await
+    .expect("library insert should succeed");
+
+    let retry_later = temp.path().join("retry-later.txt");
+    std::fs::write(&retry_later, b"unsupported").expect("fixture should be created");
+
+    let source_job = start_import_with_pool(
+        StartImportInput {
+            paths: vec![retry_later.to_string_lossy().to_string()],
+        },
+        &pool,
+    )
+    .await
+    .expect("initial import should complete with failure");
+    assert_eq!(source_job.failed_count, 1);
+
+    write_pdf(&retry_later);
+    let standalone_success = start_import_with_pool(
+        StartImportInput {
+            paths: vec![retry_later.to_string_lossy().to_string()],
+        },
+        &pool,
+    )
+    .await
+    .expect("standalone import should succeed");
+    assert_eq!(standalone_success.success_count, 1);
+
+    let retried = start_import_retry_with_pool(
+        StartImportRetryInput {
+            job_id: source_job.job_id,
+            source_paths: None,
+        },
+        &pool,
+    )
+    .await
+    .expect("retry should complete");
+
+    assert_eq!(retried.success_count, 0);
+    assert_eq!(retried.skipped_count, 1);
+    assert!(retried.items.iter().any(|item| {
+        item.status == ImportFileStatus::Skipped
+            && item.error_code.as_deref() == Some("duplicate_existing")
+    }));
 }

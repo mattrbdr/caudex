@@ -277,4 +277,161 @@ describe("first-run library setup", () => {
     expect(screen.getByText(/Dedupe:/i)).toBeTruthy();
     expect(screen.getByText("skip_duplicate")).toBeTruthy();
   });
+
+  it("retries all failed items from the current import result", async () => {
+    invokeMock.mockResolvedValueOnce({
+      id: 1,
+      name: "Main Library",
+      path: "/tmp/caudex-library",
+      created_at: "2026-03-05T15:00:00Z",
+    });
+    openMock.mockResolvedValueOnce(["/tmp/good.epub", "/tmp/bad.txt"]);
+    invokeMock.mockResolvedValueOnce({
+      job_id: 91,
+      status: "partial_success",
+      scanned_count: 2,
+      processed_count: 2,
+      success_count: 1,
+      failed_count: 1,
+      skipped_count: 0,
+      items: [
+        {
+          source_path: "/tmp/good.epub",
+          status: "success",
+          format: "epub",
+          title: "good",
+          error_message: null,
+        },
+        {
+          source_path: "/tmp/bad.txt",
+          status: "failed",
+          format: null,
+          title: null,
+          error_message: "Unsupported file format.",
+        },
+      ],
+    });
+    invokeMock.mockResolvedValueOnce({
+      job_id: 92,
+      status: "success",
+      scanned_count: 1,
+      processed_count: 1,
+      success_count: 1,
+      failed_count: 0,
+      skipped_count: 0,
+      items: [
+        {
+          source_path: "/tmp/bad.txt",
+          status: "success",
+          format: "pdf",
+          title: "bad",
+          error_message: null,
+        },
+      ],
+    });
+
+    render(Page);
+
+    const importButton = await screen.findByRole("button", {
+      name: /importer des fichiers/i,
+    });
+    await fireEvent.click(importButton);
+
+    const retryAllButton = await screen.findByRole("button", {
+      name: /retry failed \(all\)/i,
+    });
+    await fireEvent.click(retryAllButton);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "start_import_retry", {
+      input: {
+        job_id: 91,
+        source_paths: null,
+      },
+    });
+    expect(await screen.findByText(/Import #92/i)).toBeTruthy();
+  });
+
+  it("retries only selected failed items", async () => {
+    invokeMock.mockResolvedValueOnce({
+      id: 1,
+      name: "Main Library",
+      path: "/tmp/caudex-library",
+      created_at: "2026-03-05T15:00:00Z",
+    });
+    openMock.mockResolvedValueOnce(["/tmp/good.epub", "/tmp/bad-a.txt", "/tmp/bad-b.txt"]);
+    invokeMock.mockResolvedValueOnce({
+      job_id: 101,
+      status: "partial_success",
+      scanned_count: 3,
+      processed_count: 3,
+      success_count: 1,
+      failed_count: 2,
+      skipped_count: 0,
+      items: [
+        {
+          source_path: "/tmp/good.epub",
+          status: "success",
+          format: "epub",
+          title: "good",
+          error_message: null,
+        },
+        {
+          source_path: "/tmp/bad-a.txt",
+          status: "failed",
+          format: null,
+          title: null,
+          error_message: "Unsupported file format.",
+        },
+        {
+          source_path: "/tmp/bad-b.txt",
+          status: "failed",
+          format: null,
+          title: null,
+          error_message: "Unsupported file format.",
+        },
+      ],
+    });
+    invokeMock.mockResolvedValueOnce({
+      job_id: 102,
+      status: "partial_success",
+      scanned_count: 1,
+      processed_count: 1,
+      success_count: 0,
+      failed_count: 1,
+      skipped_count: 0,
+      items: [
+        {
+          source_path: "/tmp/bad-a.txt",
+          status: "failed",
+          format: null,
+          title: null,
+          error_message: "Still invalid.",
+        },
+      ],
+    });
+
+    render(Page);
+
+    const importButton = await screen.findByRole("button", {
+      name: /importer des fichiers/i,
+    });
+    await fireEvent.click(importButton);
+
+    const badACheckbox = await screen.findByRole("checkbox", {
+      name: /retry \/tmp\/bad-a\.txt/i,
+    });
+    await fireEvent.click(badACheckbox);
+
+    const retrySelectedButton = await screen.findByRole("button", {
+      name: /retry selected failed/i,
+    });
+    await fireEvent.click(retrySelectedButton);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "start_import_retry", {
+      input: {
+        job_id: 101,
+        source_paths: ["/tmp/bad-a.txt"],
+      },
+    });
+  });
 });

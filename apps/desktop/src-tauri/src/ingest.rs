@@ -19,10 +19,23 @@ pub struct StartImportInput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct GetImportJobResultInput {
+    pub job_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct StartBulkImportInput {
     pub root_path: String,
     pub duplicate_mode: BulkDuplicateMode,
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StartImportRetryInput {
+    pub job_id: i64,
+    pub source_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +76,17 @@ impl ImportFileStatus {
             ImportFileStatus::Skipped => "skipped",
         }
     }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "running" => Some(Self::Running),
+            "success" => Some(Self::Success),
+            "failed" => Some(Self::Failed),
+            "skipped" => Some(Self::Skipped),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +103,15 @@ impl ImportFormat {
             ImportFormat::Epub => "epub",
             ImportFormat::Mobi => "mobi",
             ImportFormat::Pdf => "pdf",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "epub" => Some(Self::Epub),
+            "mobi" => Some(Self::Mobi),
+            "pdf" => Some(Self::Pdf),
+            _ => None,
         }
     }
 }
@@ -200,6 +233,7 @@ struct ImportJobOptions {
     dry_run: bool,
     root_path: Option<String>,
     scanned_count: usize,
+    retry_source_job_id: Option<i64>,
 }
 
 struct BulkDiscovery {
@@ -671,9 +705,10 @@ async fn create_import_job(
           root_path,
           duplicate_mode,
           dry_run,
-          scanned_count
+          scanned_count,
+          retry_source_job_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(library_id)
@@ -684,6 +719,7 @@ async fn create_import_job(
     .bind(options.duplicate_mode.as_str())
     .bind(if options.dry_run { 1 } else { 0 })
     .bind(options.scanned_count as i64)
+    .bind(options.retry_source_job_id)
     .execute(pool)
     .await
     .map_err(|error| {
@@ -1518,6 +1554,7 @@ pub async fn start_import_with_pool(
         dry_run: false,
         root_path: None,
         scanned_count: input.paths.len(),
+        retry_source_job_id: None,
     };
 
     run_import_job(pool, input.paths, Vec::new(), options).await
@@ -1537,7 +1574,281 @@ pub async fn start_bulk_import_with_pool(
         dry_run: input.dry_run,
         root_path: Some(root.to_string_lossy().to_string()),
         scanned_count: discovery.scanned_count,
+        retry_source_job_id: None,
     };
 
     run_import_job(pool, discovery.candidates, discovery.diagnostics, options).await
+}
+
+#[derive(sqlx::FromRow)]
+struct ImportJobRow {
+    id: i64,
+    status: String,
+    scanned_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct ImportJobItemRow {
+    source_path: String,
+    detected_format: Option<String>,
+    status: String,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    library_item_id: Option<i64>,
+    index_work_unit_id: Option<i64>,
+    dedupe_decision: Option<String>,
+    title: Option<String>,
+    authors: Option<String>,
+    language: Option<String>,
+    published_at: Option<String>,
+}
+
+fn retry_path_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(trimmed);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let canonical = absolute.canonicalize().unwrap_or(absolute);
+    Some(canonical.to_string_lossy().to_ascii_lowercase())
+}
+
+pub async fn get_import_job_result_with_pool(
+    job_id: Option<i64>,
+    pool: &SqlitePool,
+) -> Result<ImportJobResult, String> {
+    let job = if let Some(id) = job_id {
+        sqlx::query_as::<_, ImportJobRow>(
+            r#"
+            SELECT id, status, scanned_count
+            FROM import_jobs
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            report_internal_error(
+                "Unable to load import job",
+                &error,
+                "Unable to load import job.",
+            )
+        })?
+    } else {
+        sqlx::query_as::<_, ImportJobRow>(
+            r#"
+            SELECT id, status, scanned_count
+            FROM import_jobs
+            ORDER BY id DESC
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            report_internal_error(
+                "Unable to load latest import job",
+                &error,
+                "Unable to load import job.",
+            )
+        })?
+    }
+    .ok_or_else(|| "Import job not found.".to_string())?;
+
+    let item_rows = sqlx::query_as::<_, ImportJobItemRow>(
+        r#"
+        SELECT
+          i.source_path,
+          i.detected_format,
+          i.status,
+          i.error_code,
+          i.error_message,
+          i.library_item_id,
+          i.index_work_unit_id,
+          i.dedupe_decision,
+          li.title,
+          li.authors,
+          li.language,
+          li.published_at
+        FROM import_job_items i
+        LEFT JOIN library_items li ON li.id = i.library_item_id
+        WHERE i.job_id = ?
+        ORDER BY i.id ASC
+        "#,
+    )
+    .bind(job.id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        report_internal_error(
+            "Unable to load import job items",
+            &error,
+            "Unable to load import results.",
+        )
+    })?;
+
+    let mut items: Vec<ImportFileResult> = Vec::with_capacity(item_rows.len());
+    for row in item_rows {
+        let status = ImportFileStatus::from_str(&row.status).ok_or_else(|| {
+            report_internal_error(
+                "Invalid import job item status value",
+                &row.status,
+                "Unable to load import results.",
+            )
+        })?;
+        let format = match row.detected_format.as_deref() {
+            None => None,
+            Some(raw) => Some(ImportFormat::from_str(raw).ok_or_else(|| {
+                report_internal_error(
+                    "Invalid import job item format value",
+                    &raw,
+                    "Unable to load import results.",
+                )
+            })?),
+        };
+        let authors = row
+            .authors
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+            .unwrap_or_default();
+
+        items.push(ImportFileResult {
+            source_path: row.source_path,
+            status,
+            format,
+            title: row.title,
+            authors,
+            language: row.language,
+            published_at: row.published_at,
+            item_id: row.library_item_id,
+            index_work_unit_id: row.index_work_unit_id,
+            error_code: row.error_code,
+            error_message: row.error_message,
+            dedupe_decision: row.dedupe_decision,
+        });
+    }
+
+    let success_count = items
+        .iter()
+        .filter(|item| item.status == ImportFileStatus::Success)
+        .count();
+    let failed_count = items
+        .iter()
+        .filter(|item| item.status == ImportFileStatus::Failed)
+        .count();
+    let skipped_count = items
+        .iter()
+        .filter(|item| item.status == ImportFileStatus::Skipped)
+        .count();
+    let processed_count = items.len();
+
+    Ok(ImportJobResult {
+        job_id: job.id,
+        status: job.status,
+        scanned_count: usize::try_from(job.scanned_count).unwrap_or(processed_count),
+        processed_count,
+        success_count,
+        failed_count,
+        skipped_count,
+        items,
+    })
+}
+
+pub async fn start_import_retry_with_pool(
+    input: StartImportRetryInput,
+    pool: &SqlitePool,
+) -> Result<ImportJobResult, String> {
+    let job_exists = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT id
+        FROM import_jobs
+        WHERE id = ?
+        "#,
+    )
+    .bind(input.job_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        report_internal_error(
+            "Unable to validate source import job",
+            &error,
+            "Unable to start retry.",
+        )
+    })?;
+    if job_exists.is_none() {
+        return Err("Import job not found.".to_string());
+    }
+
+    let failed_paths: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT source_path
+        FROM import_job_items
+        WHERE job_id = ? AND status = 'failed'
+        ORDER BY id ASC
+        "#,
+    )
+    .bind(input.job_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        report_internal_error(
+            "Unable to load failed candidates for retry",
+            &error,
+            "Unable to start retry.",
+        )
+    })?;
+
+    if failed_paths.is_empty() {
+        return Err("No failed items found for retry.".to_string());
+    }
+
+    let mut failed_by_key: HashMap<String, String> = HashMap::new();
+    for path in failed_paths {
+        if let Some(key) = retry_path_key(&path) {
+            failed_by_key.entry(key).or_insert(path);
+        }
+    }
+    if failed_by_key.is_empty() {
+        return Err("No failed items found for retry.".to_string());
+    }
+
+    let mut selected_keys_seen: HashSet<String> = HashSet::new();
+    let unique_failed_paths: Vec<String> = if let Some(selected_paths) = input.source_paths.as_ref() {
+        let mut retry_paths: Vec<String> = Vec::new();
+        for selected in selected_paths {
+            let selected_key = retry_path_key(selected)
+                .ok_or_else(|| "Retry selection contains invalid paths.".to_string())?;
+            let source_path = failed_by_key.get(&selected_key).ok_or_else(|| {
+                "Retry selection contains items that are not failed in source job.".to_string()
+            })?;
+            if selected_keys_seen.insert(selected_key) {
+                retry_paths.push(source_path.clone());
+            }
+        }
+        retry_paths
+    } else {
+        failed_by_key.into_values().collect()
+    };
+
+    if unique_failed_paths.is_empty() {
+        return Err("No failed items matched retry selection.".to_string());
+    }
+
+    let options = ImportJobOptions {
+        import_mode: "retry",
+        duplicate_mode: BulkDuplicateMode::SkipDuplicate,
+        dry_run: false,
+        root_path: None,
+        scanned_count: unique_failed_paths.len(),
+        retry_source_job_id: Some(input.job_id),
+    };
+
+    run_import_job(pool, unique_failed_paths, Vec::new(), options).await
 }

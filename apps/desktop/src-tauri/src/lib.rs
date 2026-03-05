@@ -210,6 +210,22 @@ async fn start_bulk_import(
     ingest::start_bulk_import_with_pool(input, &state.pool).await
 }
 
+#[tauri::command]
+async fn get_import_job_result(
+    input: ingest::GetImportJobResultInput,
+    state: State<'_, AppState>,
+) -> Result<ingest::ImportJobResult, String> {
+    ingest::get_import_job_result_with_pool(input.job_id, &state.pool).await
+}
+
+#[tauri::command]
+async fn start_import_retry(
+    input: ingest::StartImportRetryInput,
+    state: State<'_, AppState>,
+) -> Result<ingest::ImportJobResult, String> {
+    ingest::start_import_retry_with_pool(input, &state.pool).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -224,7 +240,9 @@ pub fn run() {
             get_library,
             create_library,
             start_import,
-            start_bulk_import
+            start_bulk_import,
+            get_import_job_result,
+            start_import_retry
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

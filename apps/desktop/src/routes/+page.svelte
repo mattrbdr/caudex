@@ -53,11 +53,16 @@
   let libraryPath = $state("");
   let isImporting = $state(false);
   let isBulkImporting = $state(false);
+  let isRetrying = $state(false);
   let latestImport = $state<ImportJobResult | null>(null);
+  let selectedRetryPaths = $state<string[]>([]);
   let bulkDuplicateMode = $state<"skip_duplicate" | "merge_metadata" | "force_import">(
     "skip_duplicate",
   );
   let bulkDryRun = $state(false);
+  const failedItems = $derived(
+    latestImport ? latestImport.items.filter((item) => item.status === "failed") : [],
+  );
 
   async function setSuggestedLibraryPath() {
     if (libraryPath.trim() !== "" || library !== null) {
@@ -190,6 +195,7 @@
           paths,
         },
       });
+      selectedRetryPaths = [];
     } catch (error) {
       importErrorMessage =
         error instanceof Error
@@ -227,6 +233,7 @@
           dry_run: bulkDryRun,
         },
       });
+      selectedRetryPaths = [];
     } catch (error) {
       importErrorMessage =
         error instanceof Error
@@ -234,6 +241,51 @@
           : "Impossible de lancer l'import de dossier. Vérifiez la sélection et réessayez.";
     } finally {
       isBulkImporting = false;
+    }
+  }
+
+  function toggleRetryPath(path: string, checked: boolean) {
+    if (checked) {
+      if (!selectedRetryPaths.includes(path)) {
+        selectedRetryPaths = [...selectedRetryPaths, path];
+      }
+      return;
+    }
+    selectedRetryPaths = selectedRetryPaths.filter((candidate) => candidate !== path);
+  }
+
+  async function retryFailedItems(retrySelectedOnly: boolean) {
+    if (!latestImport) {
+      return;
+    }
+    if (failedItems.length === 0) {
+      importErrorMessage = "Aucun élément en échec à relancer.";
+      return;
+    }
+
+    const sourcePaths: string[] | null = retrySelectedOnly ? selectedRetryPaths : null;
+    if (retrySelectedOnly && selectedRetryPaths.length === 0) {
+      importErrorMessage = "Sélectionnez au moins un élément en échec à relancer.";
+      return;
+    }
+
+    isRetrying = true;
+    importErrorMessage = "";
+    try {
+      latestImport = await invoke<ImportJobResult>("start_import_retry", {
+        input: {
+          job_id: latestImport.job_id,
+          source_paths: sourcePaths,
+        },
+      });
+      selectedRetryPaths = [];
+    } catch (error) {
+      importErrorMessage =
+        error instanceof Error
+          ? error.message
+          : "Impossible de relancer les éléments en échec. Réessayez.";
+    } finally {
+      isRetrying = false;
     }
   }
 
@@ -323,9 +375,42 @@
                   Scanned: {latestImport.scanned_count} · {latestImport.success_count} successful, {latestImport.failed_count} failed,
                   {latestImport.skipped_count} skipped
                 </p>
+                <div class="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onclick={() => retryFailedItems(false)}
+                    disabled={isRetrying || failedItems.length === 0}
+                  >
+                    Retry Failed (All)
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onclick={() => retryFailedItems(true)}
+                    disabled={isRetrying || failedItems.length === 0}
+                  >
+                    Retry Selected Failed
+                  </Button>
+                </div>
                 <ul class="space-y-2 text-sm">
                   {#each latestImport.items as item}
                     <li class="rounded border p-2">
+                      {#if item.status === "failed"}
+                        <label class="mb-1 flex items-center gap-2 text-xs">
+                          <input
+                            type="checkbox"
+                            aria-label={`Retry ${item.source_path}`}
+                            checked={selectedRetryPaths.includes(item.source_path)}
+                            onchange={(event) =>
+                              toggleRetryPath(
+                                item.source_path,
+                                (event.currentTarget as HTMLInputElement).checked,
+                              )}
+                          />
+                          Select for retry
+                        </label>
+                      {/if}
                       <p><span class="font-medium">File:</span> {item.source_path}</p>
                       <p><span class="font-medium">Status:</span> {item.status}</p>
                       <p><span class="font-medium">Format:</span> {item.format ?? "unknown"}</p>
