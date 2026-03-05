@@ -73,10 +73,7 @@ impl OpenLibraryProvider {
             .filter_map(|author| author.name)
             .collect::<Vec<_>>();
 
-        let published_at = payload
-            .publish_date
-            .as_deref()
-            .and_then(parse_publish_date);
+        let published_at = payload.publish_date.as_deref().and_then(parse_publish_date);
 
         Ok(Some(MetadataCandidate {
             title: payload.title,
@@ -164,7 +161,9 @@ fn is_iso_date(value: &str) -> bool {
     parts[0].len() == 4
         && parts[1].len() == 2
         && parts[2].len() == 2
-        && parts.iter().all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+        && parts
+            .iter()
+            .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn normalize_language(raw: &str) -> Option<String> {
@@ -185,7 +184,11 @@ impl MetadataProvider for OpenLibraryProvider {
         Box::pin(async move { self.lookup_isbn(isbn).await })
     }
 
-    fn lookup_by_title_author<'a>(&'a self, title: &'a str, authors: &'a [String]) -> ProviderFuture<'a> {
+    fn lookup_by_title_author<'a>(
+        &'a self,
+        title: &'a str,
+        authors: &'a [String],
+    ) -> ProviderFuture<'a> {
         Box::pin(async move { self.lookup_title_author(title, authors).await })
     }
 }
@@ -196,10 +199,7 @@ mod tests {
 
     #[test]
     fn year_only_publish_date_is_normalized_to_iso_day() {
-        assert_eq!(
-            parse_publish_date("2024").as_deref(),
-            Some("2024-01-01")
-        );
+        assert_eq!(parse_publish_date("2024").as_deref(), Some("2024-01-01"));
     }
 
     #[test]

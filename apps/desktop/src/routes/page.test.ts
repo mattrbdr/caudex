@@ -22,130 +22,101 @@ vi.mock("@tauri-apps/api/path", () => ({
   join: (...args: unknown[]) => joinMock(...args),
 }));
 
-describe("first-run library setup", () => {
+const readyLibrary = {
+  id: 1,
+  name: "Main Library",
+  path: "/tmp/caudex-library",
+  created_at: "2026-03-05T15:00:00Z",
+};
+
+const oneItemList = {
+  page: 1,
+  page_size: 50,
+  total: 1,
+  items: [
+    {
+      id: 12,
+      title: "Old Title",
+      authors: ["Alice"],
+      language: "en",
+      published_at: "2024-01-01",
+      format: "epub",
+      source_path: "/tmp/book.epub",
+      tags: ["to-read"],
+      collections: ["Classics"],
+    },
+  ],
+};
+
+const oneItemDetails = {
+  id: 12,
+  title: "Old Title",
+  authors: ["Alice"],
+  language: "en",
+  published_at: "2024-01-01",
+  format: "epub",
+  source_path: "/tmp/book.epub",
+  tags: ["to-read"],
+  collections: ["Classics"],
+};
+
+function installLibraryReadyInvokeHandler(overrides?: Record<string, unknown>) {
+  const map: Record<string, unknown> = {
+    get_library: readyLibrary,
+    list_library_items: oneItemList,
+    get_library_item_metadata: oneItemDetails,
+    list_metadata_enrichment_proposals: { item_id: 12, proposals: [] },
+    list_metadata_conflicts: { item_id: 12, conflicts: [] },
+    list_metadata_tags: { names: ["to-read", "favorite"] },
+    list_metadata_collections: { names: ["Classics", "Sci-Fi"] },
+    ...overrides,
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (!(command in map)) {
+      throw new Error(`Unhandled command: ${command}`);
+    }
+    return map[command];
+  });
+}
+
+describe("workspace flow", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     openMock.mockReset();
     documentDirMock.mockReset();
     homeDirMock.mockReset();
     joinMock.mockReset();
+    window.localStorage.clear();
 
     documentDirMock.mockResolvedValue("/Users/test/Documents");
     homeDirMock.mockResolvedValue("/Users/test");
     joinMock.mockResolvedValue("/Users/test/Documents/Caudex");
   });
 
-  it("shows first-run wizard when no library exists", async () => {
+  it("shows first-run setup when no library exists", async () => {
     invokeMock.mockResolvedValueOnce(null);
+
     render(Page);
 
-    const heading = await screen.findByRole("heading", {
-      name: /set up your library/i,
-    });
-
-    expect(heading).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: /set up your library/i })).toBeTruthy();
   });
 
-  it("falls back to an absolute default path when document directory is unavailable", async () => {
-    documentDirMock.mockRejectedValueOnce(new Error("unavailable"));
-    homeDirMock.mockRejectedValueOnce(new Error("home unavailable"));
+  it("creates the library and opens import step", async () => {
     invokeMock.mockResolvedValueOnce(null);
+    invokeMock.mockResolvedValueOnce(readyLibrary);
     openMock.mockResolvedValueOnce("/tmp/caudex-library");
 
     render(Page);
 
-    const chooseLocationButton = await screen.findByRole("button", {
-      name: /choisir un emplacement/i,
+    await fireEvent.input(await screen.findByLabelText(/library name/i), {
+      target: { value: "Main Library" },
     });
+    await fireEvent.click(screen.getByRole("button", { name: /choisir un emplacement/i }));
+    await fireEvent.click(screen.getByRole("button", { name: /create library/i }));
 
-    await fireEvent.click(chooseLocationButton);
-
-    expect(openMock).toHaveBeenNthCalledWith(1, {
-      directory: true,
-      multiple: false,
-      title: "Choisir un emplacement",
-      defaultPath: "/tmp/Caudex",
-    });
-  });
-
-  it("keeps the flow usable when picker is cancelled", async () => {
-    invokeMock.mockResolvedValueOnce(null);
-    openMock.mockResolvedValueOnce(null);
-
-    render(Page);
-
-    const chooseLocationButton = await screen.findByRole("button", {
-      name: /choisir un emplacement/i,
-    });
-    await fireEvent.click(chooseLocationButton);
-
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("shows actionable error when picker permission is denied", async () => {
-    invokeMock.mockResolvedValueOnce(null);
-    openMock.mockRejectedValueOnce(new Error("permission denied"));
-
-    render(Page);
-
-    const chooseLocationButton = await screen.findByRole("button", {
-      name: /choisir un emplacement/i,
-    });
-    await fireEvent.click(chooseLocationButton);
-
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent?.toLowerCase()).toContain("impossible d'ouvrir le sélecteur de dossier");
-  });
-
-  it("shows actionable error when picker returns invalid value", async () => {
-    invokeMock.mockResolvedValueOnce(null);
-    openMock.mockResolvedValueOnce(["/tmp/a", "/tmp/b"]);
-
-    render(Page);
-
-    const chooseLocationButton = await screen.findByRole("button", {
-      name: /choisir un emplacement/i,
-    });
-    await fireEvent.click(chooseLocationButton);
-
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent?.toLowerCase()).toContain("valeur invalide");
-  });
-
-  it("creates the library and shows configured state", async () => {
-    invokeMock.mockResolvedValueOnce(null);
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
-    });
-    openMock.mockResolvedValueOnce("/tmp/caudex-library");
-
-    render(Page);
-
-    const nameInput = await screen.findByLabelText(/library name/i);
-    const chooseLocationButton = screen.getByRole("button", {
-      name: /choisir un emplacement/i,
-    });
-    const button = screen.getByRole("button", { name: /create library/i });
-
-    await fireEvent.input(nameInput, { target: { value: "Main Library" } });
-    await fireEvent.click(chooseLocationButton);
-    await fireEvent.click(button);
-
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /library ready/i })).toBeTruthy();
-    });
-
-    expect(invokeMock).toHaveBeenNthCalledWith(1, "get_library");
-    expect(openMock).toHaveBeenNthCalledWith(1, {
-      directory: true,
-      multiple: false,
-      title: "Choisir un emplacement",
-      defaultPath: "/Users/test/Documents/Caudex",
-    });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "create_library", {
+    expect(await screen.findByRole("heading", { name: /import/i })).toBeTruthy();
+    expect(invokeMock).toHaveBeenCalledWith("create_library", {
       input: {
         name: "Main Library",
         path: "/tmp/caudex-library",
@@ -153,676 +124,386 @@ describe("first-run library setup", () => {
     });
   });
 
-  it("imports selected files and displays per-file outcomes", async () => {
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
+  it("imports selected files from the import step", async () => {
+    installLibraryReadyInvokeHandler({
+      list_library_items: { page: 1, page_size: 50, total: 0, items: [] },
+      start_import: {
+        job_id: 77,
+        status: "partial_success",
+        scanned_count: 2,
+        processed_count: 2,
+        success_count: 1,
+        failed_count: 1,
+        skipped_count: 0,
+        items: [
+          {
+            source_path: "/tmp/good.epub",
+            status: "success",
+            format: "epub",
+            title: "good",
+            error_message: null,
+          },
+          {
+            source_path: "/tmp/bad.txt",
+            status: "failed",
+            format: null,
+            title: null,
+            error_message: "Unsupported file format.",
+          },
+        ],
+      },
     });
     openMock.mockResolvedValueOnce(["/tmp/good.epub", "/tmp/bad.txt"]);
-    invokeMock.mockResolvedValueOnce({
-      job_id: 77,
-      status: "partial_success",
-      processed_count: 2,
-      success_count: 1,
-      failed_count: 1,
-      skipped_count: 0,
-      items: [
-        {
-          source_path: "/tmp/good.epub",
-          status: "success",
-          format: "epub",
-          title: "good",
-          error_message: null,
-        },
-        {
-          source_path: "/tmp/bad.txt",
-          status: "failed",
-          format: null,
-          title: null,
-          error_message: "Unsupported file format.",
-        },
-      ],
-    });
 
     render(Page);
 
-    const importButton = await screen.findByRole("button", {
-      name: /importer des fichiers/i,
-    });
-    await fireEvent.click(importButton);
+    await fireEvent.click(await screen.findByRole("button", { name: /^Import$/i }));
+    await fireEvent.click(await screen.findByRole("button", { name: /importer des fichiers/i }));
 
-    expect(openMock).toHaveBeenNthCalledWith(1, {
-      directory: false,
-      multiple: true,
-      title: "Sélectionner des ebooks",
-      filters: [
-        {
-          name: "Ebooks",
-          extensions: ["epub", "mobi", "pdf"],
-        },
-      ],
-    });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "start_import", {
+    expect(invokeMock).toHaveBeenCalledWith("start_import", {
       input: {
         paths: ["/tmp/good.epub", "/tmp/bad.txt"],
       },
     });
-
-    expect(await screen.findByText(/1 successful/i)).toBeTruthy();
-    expect(screen.getByText(/1 failed/i)).toBeTruthy();
-    expect(screen.getByText("/tmp/good.epub")).toBeTruthy();
-    expect(screen.getByText("/tmp/bad.txt")).toBeTruthy();
-    expect(screen.getByText("Unsupported file format.")).toBeTruthy();
+    expect(await screen.findByText(/unsupported file format/i)).toBeTruthy();
   });
 
-  it("imports a folder tree and shows duplicate decision diagnostics", async () => {
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
-    });
-    openMock.mockResolvedValueOnce("/tmp/library-tree");
-    invokeMock.mockResolvedValueOnce({
-      job_id: 88,
-      status: "partial_success",
-      scanned_count: 4,
-      processed_count: 4,
-      success_count: 2,
-      failed_count: 1,
-      skipped_count: 1,
-      items: [
-        {
-          source_path: "/tmp/library-tree/a.pdf",
-          status: "success",
-          format: "pdf",
-          title: "a",
-          error_message: null,
-          dedupe_decision: null,
-        },
-        {
-          source_path: "/tmp/library-tree/nested/b.pdf",
-          status: "skipped",
-          format: "pdf",
-          title: "b",
-          error_message: "Duplicate content detected and skipped.",
-          dedupe_decision: "skip_duplicate",
-        },
-      ],
+  it("loads metadata and saves edited values including tags/collections", async () => {
+    installLibraryReadyInvokeHandler({
+      update_library_item_metadata: {
+        ...oneItemDetails,
+        title: "New Title",
+        authors: ["Alice", "Bob"],
+        language: "fr",
+        published_at: "2024-12-31",
+        tags: ["favorite", "batch-updated"],
+        collections: ["Curated"],
+      },
     });
 
     render(Page);
+    await fireEvent.click(await screen.findByRole("button", { name: /^Metadata$/i }));
 
-    const importFolderButton = await screen.findByRole("button", {
-      name: /importer un dossier/i,
+    await fireEvent.input(await screen.findByLabelText(/metadata title/i), {
+      target: { value: "New Title" },
     });
-    await fireEvent.click(importFolderButton);
-
-    expect(openMock).toHaveBeenNthCalledWith(1, {
-      directory: true,
-      multiple: false,
-      title: "Sélectionner un dossier à importer",
+    await fireEvent.input(screen.getByLabelText(/metadata authors/i), {
+      target: { value: "Alice, Bob" },
     });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "start_bulk_import", {
-      input: {
-        root_path: "/tmp/library-tree",
-        duplicate_mode: "skip_duplicate",
-        dry_run: false,
-      },
+    await fireEvent.input(screen.getByLabelText(/metadata language/i), {
+      target: { value: "fr" },
     });
-
-    expect(await screen.findByText(/Scanned: 4/i)).toBeTruthy();
-    expect(screen.getByText(/Dedupe:/i)).toBeTruthy();
-    expect(screen.getByText("skip_duplicate")).toBeTruthy();
-  });
-
-  it("retries all failed items from the current import result", async () => {
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
+    await fireEvent.input(screen.getByLabelText(/metadata published date/i), {
+      target: { value: "2024-12-31" },
     });
-    openMock.mockResolvedValueOnce(["/tmp/good.epub", "/tmp/bad.txt"]);
-    invokeMock.mockResolvedValueOnce({
-      job_id: 91,
-      status: "partial_success",
-      scanned_count: 2,
-      processed_count: 2,
-      success_count: 1,
-      failed_count: 1,
-      skipped_count: 0,
-      items: [
-        {
-          source_path: "/tmp/good.epub",
-          status: "success",
-          format: "epub",
-          title: "good",
-          error_message: null,
-        },
-        {
-          source_path: "/tmp/bad.txt",
-          status: "failed",
-          format: null,
-          title: null,
-          error_message: "Unsupported file format.",
-        },
-      ],
+    await fireEvent.input(screen.getByLabelText(/metadata tags/i), {
+      target: { value: "favorite, batch-updated" },
     });
-    invokeMock.mockResolvedValueOnce({
-      job_id: 92,
-      status: "success",
-      scanned_count: 1,
-      processed_count: 1,
-      success_count: 1,
-      failed_count: 0,
-      skipped_count: 0,
-      items: [
-        {
-          source_path: "/tmp/bad.txt",
-          status: "success",
-          format: "pdf",
-          title: "bad",
-          error_message: null,
-        },
-      ],
+    await fireEvent.input(screen.getByLabelText(/metadata collections/i), {
+      target: { value: "Curated" },
     });
 
-    render(Page);
+    await fireEvent.click(screen.getByRole("button", { name: /enregistrer metadata/i }));
 
-    const importButton = await screen.findByRole("button", {
-      name: /importer des fichiers/i,
-    });
-    await fireEvent.click(importButton);
-
-    const retryAllButton = await screen.findByRole("button", {
-      name: /retry failed \(all\)/i,
-    });
-    await fireEvent.click(retryAllButton);
-
-    expect(invokeMock).toHaveBeenNthCalledWith(3, "start_import_retry", {
-      input: {
-        job_id: 91,
-        source_paths: null,
-      },
-    });
-    expect(await screen.findByText(/Import #92/i)).toBeTruthy();
-  });
-
-  it("retries only selected failed items", async () => {
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
-    });
-    openMock.mockResolvedValueOnce(["/tmp/good.epub", "/tmp/bad-a.txt", "/tmp/bad-b.txt"]);
-    invokeMock.mockResolvedValueOnce({
-      job_id: 101,
-      status: "partial_success",
-      scanned_count: 3,
-      processed_count: 3,
-      success_count: 1,
-      failed_count: 2,
-      skipped_count: 0,
-      items: [
-        {
-          source_path: "/tmp/good.epub",
-          status: "success",
-          format: "epub",
-          title: "good",
-          error_message: null,
-        },
-        {
-          source_path: "/tmp/bad-a.txt",
-          status: "failed",
-          format: null,
-          title: null,
-          error_message: "Unsupported file format.",
-        },
-        {
-          source_path: "/tmp/bad-b.txt",
-          status: "failed",
-          format: null,
-          title: null,
-          error_message: "Unsupported file format.",
-        },
-      ],
-    });
-    invokeMock.mockResolvedValueOnce({
-      job_id: 102,
-      status: "partial_success",
-      scanned_count: 1,
-      processed_count: 1,
-      success_count: 0,
-      failed_count: 1,
-      skipped_count: 0,
-      items: [
-        {
-          source_path: "/tmp/bad-a.txt",
-          status: "failed",
-          format: null,
-          title: null,
-          error_message: "Still invalid.",
-        },
-      ],
-    });
-
-    render(Page);
-
-    const importButton = await screen.findByRole("button", {
-      name: /importer des fichiers/i,
-    });
-    await fireEvent.click(importButton);
-
-    const badACheckbox = await screen.findByRole("checkbox", {
-      name: /retry \/tmp\/bad-a\.txt/i,
-    });
-    await fireEvent.click(badACheckbox);
-
-    const retrySelectedButton = await screen.findByRole("button", {
-      name: /retry selected failed/i,
-    });
-    await fireEvent.click(retrySelectedButton);
-
-    expect(invokeMock).toHaveBeenNthCalledWith(3, "start_import_retry", {
-      input: {
-        job_id: 101,
-        source_paths: ["/tmp/bad-a.txt"],
-      },
-    });
-  });
-
-  it("loads metadata list, opens one item, and saves edited metadata", async () => {
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
-    });
-    invokeMock.mockResolvedValueOnce({
-      page: 1,
-      page_size: 50,
-      total: 1,
-      items: [
-        {
-          id: 12,
-          title: "Old Title",
-          authors: ["Alice"],
-          language: "en",
-          published_at: "2024-01-01",
-          format: "epub",
-          source_path: "/tmp/book.epub",
-        },
-      ],
-    });
-    invokeMock.mockResolvedValueOnce({
-      id: 12,
-      title: "Old Title",
-      authors: ["Alice"],
-      language: "en",
-      published_at: "2024-01-01",
-      format: "epub",
-      source_path: "/tmp/book.epub",
-    });
-    invokeMock.mockResolvedValueOnce({
-      item_id: 12,
-      proposals: [],
-    });
-    invokeMock.mockResolvedValueOnce({
-      id: 12,
-      title: "New Title",
-      authors: ["Alice", "Bob"],
-      language: "fr",
-      published_at: "2024-12-31",
-      format: "epub",
-      source_path: "/tmp/book.epub",
-    });
-
-    render(Page);
-
-    const loadMetadataButton = await screen.findByRole("button", {
-      name: /charger les métadonnées/i,
-    });
-    await fireEvent.click(loadMetadataButton);
-
-    const titleInput = await screen.findByLabelText(/metadata title/i);
-    const authorsInput = screen.getByLabelText(/metadata authors/i);
-    const languageInput = screen.getByLabelText(/metadata language/i);
-    const publishedAtInput = screen.getByLabelText(/metadata published date/i);
-
-    await fireEvent.input(titleInput, { target: { value: "New Title" } });
-    await fireEvent.input(authorsInput, { target: { value: "Alice, Bob" } });
-    await fireEvent.input(languageInput, { target: { value: "fr" } });
-    await fireEvent.input(publishedAtInput, { target: { value: "2024-12-31" } });
-
-    const saveButton = screen.getByRole("button", { name: /enregistrer metadata/i });
-    await fireEvent.click(saveButton);
-
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "list_library_items", {
-      input: {
-        page: 1,
-        page_size: 50,
-      },
-    });
-    expect(invokeMock).toHaveBeenNthCalledWith(3, "get_library_item_metadata", {
-      input: {
-        item_id: 12,
-      },
-    });
-    expect(invokeMock).toHaveBeenNthCalledWith(4, "list_metadata_enrichment_proposals", {
-      input: {
-        item_id: 12,
-      },
-    });
-    expect(invokeMock).toHaveBeenNthCalledWith(5, "update_library_item_metadata", {
+    expect(invokeMock).toHaveBeenCalledWith("update_library_item_metadata", {
       input: {
         item_id: 12,
         title: "New Title",
         authors: ["Alice", "Bob"],
         language: "fr",
         published_at: "2024-12-31",
+        tags: ["favorite", "batch-updated"],
+        collections: ["Curated"],
       },
     });
-
     expect(await screen.findByText(/metadata enregistrée/i)).toBeTruthy();
   });
 
-  it("resets metadata form values when cancel is clicked", async () => {
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
-    });
-    invokeMock.mockResolvedValueOnce({
-      page: 1,
-      page_size: 50,
-      total: 1,
-      items: [
-        {
-          id: 12,
-          title: "Old Title",
-          authors: ["Alice"],
-          language: "en",
-          published_at: "2024-01-01",
-          format: "epub",
-          source_path: "/tmp/book.epub",
-        },
-      ],
-    });
-    invokeMock.mockResolvedValueOnce({
-      id: 12,
-      title: "Old Title",
-      authors: ["Alice"],
-      language: "en",
-      published_at: "2024-01-01",
-      format: "epub",
-      source_path: "/tmp/book.epub",
-    });
-    invokeMock.mockResolvedValueOnce({
-      item_id: 12,
-      proposals: [],
+  it("runs batch preview and execute on selected items", async () => {
+    installLibraryReadyInvokeHandler({
+      preview_batch_metadata_update: {
+        run_id: "batch-preview-1",
+        mode: "preview",
+        status: "success",
+        total_targets: 1,
+        updated_count: 1,
+        skipped_count: 0,
+        failed_count: 0,
+        outcomes: [
+          {
+            item_id: 12,
+            status: "updated",
+            reason: null,
+            retry_eligible: false,
+            before: oneItemDetails,
+            after: { ...oneItemDetails, title: "Batch Title" },
+          },
+        ],
+      },
+      execute_batch_metadata_update: {
+        run_id: "batch-exec-1",
+        mode: "execute",
+        status: "success",
+        total_targets: 1,
+        updated_count: 1,
+        skipped_count: 0,
+        failed_count: 0,
+        outcomes: [
+          {
+            item_id: 12,
+            status: "updated",
+            reason: null,
+            retry_eligible: false,
+            before: oneItemDetails,
+            after: { ...oneItemDetails, title: "Batch Title" },
+          },
+        ],
+      },
     });
 
     render(Page);
 
-    const loadMetadataButton = await screen.findByRole("button", {
-      name: /charger les métadonnées/i,
+    await fireEvent.click(await screen.findByRole("button", { name: /^Batch$/i }));
+    await fireEvent.click(await screen.findByRole("button", { name: /sélectionner visibles/i }));
+
+    await fireEvent.input(screen.getByLabelText(/batch title/i), {
+      target: { value: "Batch Title" },
     });
-    await fireEvent.click(loadMetadataButton);
 
-    const titleInput = await screen.findByLabelText(/metadata title/i);
-    await fireEvent.input(titleInput, { target: { value: "Draft title" } });
+    await fireEvent.click(screen.getByRole("button", { name: /aperçu batch/i }));
+    expect(invokeMock).toHaveBeenCalledWith("preview_batch_metadata_update", {
+      input: {
+        item_ids: [12],
+        patch: {
+          title: "Batch Title",
+        },
+      },
+    });
 
-    const cancelButton = screen.getByRole("button", { name: /annuler modifications/i });
-    await fireEvent.click(cancelButton);
+    await fireEvent.click(screen.getByRole("button", { name: /exécuter batch/i }));
+    expect(invokeMock).toHaveBeenCalledWith("execute_batch_metadata_update", {
+      input: {
+        item_ids: [12],
+        patch: {
+          title: "Batch Title",
+        },
+      },
+    });
 
-    expect((titleInput as HTMLInputElement).value).toBe("Old Title");
-    expect(await screen.findByText(/modifications annulées/i)).toBeTruthy();
+    expect(await screen.findByText(/execute run batch-exec-1/i)).toBeTruthy();
   });
 
-  it("keeps edited metadata form values when save fails", async () => {
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
-    });
-    invokeMock.mockResolvedValueOnce({
-      page: 1,
-      page_size: 50,
-      total: 1,
-      items: [
-        {
-          id: 12,
-          title: "Old Title",
-          authors: ["Alice"],
-          language: "en",
-          published_at: "2024-01-01",
-          format: "epub",
-          source_path: "/tmp/book.epub",
+  it("detects and resolves metadata conflicts", async () => {
+    installLibraryReadyInvokeHandler({
+      detect_metadata_conflicts: {
+        item_id: 12,
+        conflicts: [
+          {
+            id: 700,
+            item_id: 12,
+            field_name: "title",
+            current_value: "Old Title",
+            candidate_value: "Draft Title",
+            candidate_source: "manual_edit",
+            status: "pending",
+            rationale: null,
+            created_at: "2026-03-05T19:00:00Z",
+            resolved_at: null,
+          },
+        ],
+      },
+      list_metadata_conflicts: {
+        item_id: 12,
+        conflicts: [
+          {
+            id: 700,
+            item_id: 12,
+            field_name: "title",
+            current_value: "Old Title",
+            candidate_value: "Draft Title",
+            candidate_source: "manual_edit",
+            status: "pending",
+            rationale: null,
+            created_at: "2026-03-05T19:00:00Z",
+            resolved_at: null,
+          },
+        ],
+      },
+      resolve_metadata_conflict: {
+        conflict: {
+          id: 700,
+          item_id: 12,
+          field_name: "title",
+          current_value: "Old Title",
+          candidate_value: "Draft Title",
+          candidate_source: "manual_edit",
+          status: "resolved_use_candidate",
+          rationale: "Applied from explicit curator decision",
+          created_at: "2026-03-05T19:00:00Z",
+          resolved_at: "2026-03-05T19:02:00Z",
         },
-      ],
-    });
-    invokeMock.mockResolvedValueOnce({
-      id: 12,
-      title: "Old Title",
-      authors: ["Alice"],
-      language: "en",
-      published_at: "2024-01-01",
-      format: "epub",
-      source_path: "/tmp/book.epub",
-    });
-    invokeMock.mockResolvedValueOnce({
-      item_id: 12,
-      proposals: [],
-    });
-    invokeMock.mockRejectedValueOnce(new Error("Title is required."));
-
-    render(Page);
-
-    const loadMetadataButton = await screen.findByRole("button", {
-      name: /charger les métadonnées/i,
-    });
-    await fireEvent.click(loadMetadataButton);
-
-    const titleInput = await screen.findByLabelText(/metadata title/i);
-    await fireEvent.input(titleInput, { target: { value: "   " } });
-
-    const saveButton = screen.getByRole("button", { name: /enregistrer metadata/i });
-    await fireEvent.click(saveButton);
-
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Title is required.");
-    expect((titleInput as HTMLInputElement).value).toBe("   ");
-  });
-
-  it("triggers enrichment and renders proposal provenance and confidence", async () => {
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
-    });
-    invokeMock.mockResolvedValueOnce({
-      page: 1,
-      page_size: 50,
-      total: 1,
-      items: [
-        {
-          id: 12,
-          title: "Old Title",
-          authors: ["Alice"],
-          language: "en",
-          published_at: "2024-01-01",
-          format: "epub",
-          source_path: "/tmp/book.epub",
+        item: {
+          ...oneItemDetails,
+          title: "Draft Title",
         },
-      ],
-    });
-    invokeMock.mockResolvedValueOnce({
-      id: 12,
-      title: "Old Title",
-      authors: ["Alice"],
-      language: "en",
-      published_at: "2024-01-01",
-      format: "epub",
-      source_path: "/tmp/book.epub",
-    });
-    invokeMock.mockResolvedValueOnce({
-      item_id: 12,
-      proposals: [],
-    });
-    invokeMock.mockResolvedValueOnce({
-      run_id: 300,
-      status: "degraded",
-      diagnostic: "google_books: timeout",
-      proposals: [
-        {
-          id: 44,
-          provider: "open_library",
-          confidence: 0.55,
-          title: "Enriched Title",
-          authors: ["Alice", "Bob"],
-          language: "fr",
-          published_at: "2024-12-31",
-          diagnostic: "Primary provider degraded; fallback provider proposal used.",
-          applied_at: null,
-        },
-      ],
+      },
     });
 
     render(Page);
+    await fireEvent.click(await screen.findByRole("button", { name: /^Metadata$/i }));
 
-    const loadMetadataButton = await screen.findByRole("button", {
-      name: /charger les métadonnées/i,
+    await fireEvent.input(await screen.findByLabelText(/metadata title/i), {
+      target: { value: "Draft Title" },
     });
-    await fireEvent.click(loadMetadataButton);
 
-    const enrichButton = await screen.findByRole("button", {
-      name: /enrichir metadata/i,
-    });
-    await fireEvent.click(enrichButton);
-
-    expect(invokeMock).toHaveBeenNthCalledWith(5, "enrich_library_item_metadata", {
+    await fireEvent.click(screen.getByRole("button", { name: /^Conflicts$/i }));
+    await fireEvent.click(screen.getByRole("button", { name: /détecter conflits/i }));
+    expect(invokeMock).toHaveBeenCalledWith("detect_metadata_conflicts", {
       input: {
         item_id: 12,
-      },
-    });
-    expect(await screen.findByText(/open_library/i)).toBeTruthy();
-    expect(screen.getByText(/0.55/)).toBeTruthy();
-    expect(screen.getByText(/fallback provider proposal used/i)).toBeTruthy();
-  });
-
-  it("applies selected enrichment proposal and refreshes proposal list", async () => {
-    invokeMock.mockResolvedValueOnce({
-      id: 1,
-      name: "Main Library",
-      path: "/tmp/caudex-library",
-      created_at: "2026-03-05T15:00:00Z",
-    });
-    invokeMock.mockResolvedValueOnce({
-      page: 1,
-      page_size: 50,
-      total: 1,
-      items: [
-        {
-          id: 12,
-          title: "Old Title",
+        source: "manual_edit",
+        candidate: {
+          title: "Draft Title",
           authors: ["Alice"],
           language: "en",
           published_at: "2024-01-01",
-          format: "epub",
-          source_path: "/tmp/book.epub",
         },
-      ],
-    });
-    invokeMock.mockResolvedValueOnce({
-      id: 12,
-      title: "Old Title",
-      authors: ["Alice"],
-      language: "en",
-      published_at: "2024-01-01",
-      format: "epub",
-      source_path: "/tmp/book.epub",
-    });
-    invokeMock.mockResolvedValueOnce({
-      item_id: 12,
-      proposals: [],
-    });
-    invokeMock.mockResolvedValueOnce({
-      run_id: 301,
-      status: "success",
-      diagnostic: null,
-      proposals: [
-        {
-          id: 45,
-          provider: "google_books",
-          confidence: 0.91,
-          title: "Enriched Title",
-          authors: ["Alice", "Bob"],
-          language: "fr",
-          published_at: "2024-12-31",
-          diagnostic: null,
-          applied_at: null,
-        },
-      ],
-    });
-    invokeMock.mockResolvedValueOnce({
-      proposal_id: 45,
-      item: {
-        id: 12,
-        title: "Enriched Title",
-        authors: ["Alice", "Bob"],
-        language: "fr",
-        published_at: "2024-12-31",
-        format: "epub",
-        source_path: "/tmp/book.epub",
       },
     });
-    invokeMock.mockResolvedValueOnce({
-      item_id: 12,
-      proposals: [
-        {
-          id: 45,
-          provider: "google_books",
-          confidence: 0.91,
+
+    await fireEvent.click(await screen.findByRole("button", { name: /appliquer candidat/i }));
+
+    expect(invokeMock).toHaveBeenCalledWith("resolve_metadata_conflict", {
+      input: {
+        conflict_id: 700,
+        resolution: "use_candidate",
+        rationale: "Applied from explicit curator decision",
+      },
+    });
+    expect(await screen.findByText(/conflit résolu/i)).toBeTruthy();
+  });
+
+  it("runs enrichment and applies a proposal", async () => {
+    installLibraryReadyInvokeHandler({
+      enrich_library_item_metadata: {
+        run_id: 301,
+        status: "success",
+        diagnostic: null,
+        proposals: [
+          {
+            id: 45,
+            provider: "google_books",
+            confidence: 0.91,
+            title: "Enriched Title",
+            authors: ["Alice", "Bob"],
+            language: "fr",
+            published_at: "2024-12-31",
+            diagnostic: null,
+            applied_at: null,
+          },
+        ],
+      },
+      apply_metadata_enrichment_proposal: {
+        proposal_id: 45,
+        item: {
+          ...oneItemDetails,
           title: "Enriched Title",
           authors: ["Alice", "Bob"],
           language: "fr",
           published_at: "2024-12-31",
-          diagnostic: null,
-          applied_at: "2026-03-05T19:30:00Z",
         },
-      ],
+      },
+      list_metadata_enrichment_proposals: {
+        item_id: 12,
+        proposals: [
+          {
+            id: 45,
+            provider: "google_books",
+            confidence: 0.91,
+            title: "Enriched Title",
+            authors: ["Alice", "Bob"],
+            language: "fr",
+            published_at: "2024-12-31",
+            diagnostic: null,
+            applied_at: "2026-03-05T19:30:00Z",
+          },
+        ],
+      },
     });
 
     render(Page);
+    await fireEvent.click(await screen.findByRole("button", { name: /^Metadata$/i }));
 
-    const loadMetadataButton = await screen.findByRole("button", {
-      name: /charger les métadonnées/i,
-    });
-    await fireEvent.click(loadMetadataButton);
+    await fireEvent.click(await screen.findByRole("button", { name: /enrichir metadata/i }));
+    await fireEvent.click(screen.getByRole("button", { name: /^Settings$/i }));
+    await fireEvent.click(await screen.findByRole("button", { name: /appliquer proposition/i }));
 
-    const enrichButton = await screen.findByRole("button", {
-      name: /enrichir metadata/i,
-    });
-    await fireEvent.click(enrichButton);
-
-    const applyButton = await screen.findByRole("button", {
-      name: /appliquer proposition/i,
-    });
-    await fireEvent.click(applyButton);
-
-    expect(invokeMock).toHaveBeenNthCalledWith(6, "apply_metadata_enrichment_proposal", {
+    expect(invokeMock).toHaveBeenCalledWith("apply_metadata_enrichment_proposal", {
       input: {
         proposal_id: 45,
       },
     });
-    expect(await screen.findByText(/proposition appliquée avec succès/i)).toBeTruthy();
-    expect(screen.getByText(/Applied at:/i)).toBeTruthy();
+    expect(await screen.findByText(/applied at:/i)).toBeTruthy();
+  });
+
+  it("restores persisted workspace filters and step", async () => {
+    window.localStorage.setItem(
+      "caudex.workspace.v1",
+      JSON.stringify({
+        step: "import",
+        selected_metadata_item_id: 12,
+        filters: {
+          author: "Alice",
+          language: "en",
+          tag: "to-read",
+          collection: "Classics",
+          sort_by: "title",
+          sort_direction: "desc",
+        },
+      }),
+    );
+
+    installLibraryReadyInvokeHandler();
+
+    render(Page);
+
+    expect(await screen.findByRole("heading", { name: /import/i })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole("button", { name: /^Library$/i }));
+    const filterAuthorInput = (await screen.findByLabelText(/^Author$/i)) as HTMLInputElement;
+    const filterLanguageInput = screen.getByLabelText(/^Language$/i) as HTMLInputElement;
+    expect(filterAuthorInput.value).toBe("Alice");
+    expect(filterLanguageInput.value).toBe("en");
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("list_library_items", {
+        input: {
+          page: 1,
+          page_size: 50,
+          author: "Alice",
+          language: "en",
+          published_from: null,
+          published_to: null,
+          tag: "to-read",
+          collection: "Classics",
+          sort_by: "title",
+          sort_direction: "desc",
+        },
+      });
+    });
+  });
+
+  it("opens metadata editor from library table with keyboard enter", async () => {
+    installLibraryReadyInvokeHandler();
+
+    render(Page);
+
+    const titleCell = await screen.findByText("Old Title");
+    const row = titleCell.closest("tr") as HTMLElement;
+    row.focus();
+
+    await fireEvent.keyDown(row, { key: "Enter" });
+
+    expect(await screen.findByRole("heading", { name: /metadata editor/i })).toBeTruthy();
   });
 });

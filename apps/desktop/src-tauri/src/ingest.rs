@@ -1820,7 +1820,8 @@ pub async fn start_import_retry_with_pool(
     }
 
     let mut selected_keys_seen: HashSet<String> = HashSet::new();
-    let unique_failed_paths: Vec<String> = if let Some(selected_paths) = input.source_paths.as_ref() {
+    let unique_failed_paths: Vec<String> = if let Some(selected_paths) = input.source_paths.as_ref()
+    {
         let mut retry_paths: Vec<String> = Vec::new();
         for selected in selected_paths {
             let selected_key = retry_path_key(selected)

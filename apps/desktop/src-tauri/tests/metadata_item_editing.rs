@@ -99,6 +99,14 @@ async fn list_items_returns_stable_paginated_order() {
         ListLibraryItemsInput {
             page: Some(1),
             page_size: Some(2),
+            author: None,
+            language: None,
+            published_from: None,
+            published_to: None,
+            tag: None,
+            collection: None,
+            sort_by: None,
+            sort_direction: None,
         },
         &pool,
     )
@@ -108,6 +116,14 @@ async fn list_items_returns_stable_paginated_order() {
         ListLibraryItemsInput {
             page: Some(2),
             page_size: Some(2),
+            author: None,
+            language: None,
+            published_from: None,
+            published_to: None,
+            tag: None,
+            collection: None,
+            sort_by: None,
+            sort_direction: None,
         },
         &pool,
     )
@@ -142,6 +158,8 @@ async fn update_metadata_succeeds_and_normalizes_authors() {
             ],
             language: Some("fr".to_string()),
             published_at: Some("2024-12-31".to_string()),
+            tags: None,
+            collections: None,
         },
         &pool,
     )
@@ -149,7 +167,10 @@ async fn update_metadata_succeeds_and_normalizes_authors() {
     .expect("update should succeed");
 
     assert_eq!(updated.title, "New Title");
-    assert_eq!(updated.authors, vec!["Alice".to_string(), "Bob".to_string()]);
+    assert_eq!(
+        updated.authors,
+        vec!["Alice".to_string(), "Bob".to_string()]
+    );
     assert_eq!(updated.language.as_deref(), Some("fr"));
     assert_eq!(updated.published_at.as_deref(), Some("2024-12-31"));
 }
@@ -170,6 +191,8 @@ async fn update_metadata_rejects_invalid_values() {
             authors: vec!["Alice".to_string()],
             language: Some("en".to_string()),
             published_at: Some("2024-01-01".to_string()),
+            tags: None,
+            collections: None,
         },
         &pool,
     )
@@ -184,6 +207,8 @@ async fn update_metadata_rejects_invalid_values() {
             authors: vec!["Alice".to_string()],
             language: Some("english".to_string()),
             published_at: Some("2024-01-01".to_string()),
+            tags: None,
+            collections: None,
         },
         &pool,
     )
@@ -198,6 +223,8 @@ async fn update_metadata_rejects_invalid_values() {
             authors: vec!["Alice".to_string()],
             language: Some("en".to_string()),
             published_at: Some("2024-31-12".to_string()),
+            tags: None,
+            collections: None,
         },
         &pool,
     )
@@ -215,12 +242,10 @@ async fn no_op_update_keeps_metadata_stable() {
         .expect("migrations should apply");
     let item_id = seed_library_item(&pool).await;
 
-    let original = get_library_item_metadata_with_pool(
-        GetLibraryItemMetadataInput { item_id },
-        &pool,
-    )
-    .await
-    .expect("should fetch item");
+    let original =
+        get_library_item_metadata_with_pool(GetLibraryItemMetadataInput { item_id }, &pool)
+            .await
+            .expect("should fetch item");
 
     let updated = update_library_item_metadata_with_pool(
         UpdateLibraryItemMetadataInput {
@@ -229,6 +254,8 @@ async fn no_op_update_keeps_metadata_stable() {
             authors: original.authors.clone(),
             language: original.language.clone(),
             published_at: original.published_at.clone(),
+            tags: None,
+            collections: None,
         },
         &pool,
     )
@@ -261,6 +288,8 @@ async fn concurrent_updates_do_not_corrupt_row_shape() {
                 authors: vec!["Alice".to_string()],
                 language: Some("en".to_string()),
                 published_at: Some("2024-06-01".to_string()),
+                tags: None,
+                collections: None,
             },
             &pool_a,
         )
@@ -275,6 +304,8 @@ async fn concurrent_updates_do_not_corrupt_row_shape() {
                 authors: vec!["Bob".to_string(), "Bob".to_string()],
                 language: Some("fr".to_string()),
                 published_at: Some("2024-06-02".to_string()),
+                tags: None,
+                collections: None,
             },
             &pool_b,
         )
@@ -284,12 +315,10 @@ async fn concurrent_updates_do_not_corrupt_row_shape() {
     let _ = first.await.expect("first task should complete");
     let _ = second.await.expect("second task should complete");
 
-    let final_row = get_library_item_metadata_with_pool(
-        GetLibraryItemMetadataInput { item_id },
-        &pool,
-    )
-    .await
-    .expect("final fetch should succeed");
+    let final_row =
+        get_library_item_metadata_with_pool(GetLibraryItemMetadataInput { item_id }, &pool)
+            .await
+            .expect("final fetch should succeed");
 
     assert!(!final_row.title.trim().is_empty());
     assert!(!final_row.authors.is_empty());

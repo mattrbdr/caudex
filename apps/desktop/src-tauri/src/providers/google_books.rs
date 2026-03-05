@@ -55,7 +55,10 @@ impl GoogleBooksProvider {
             .map_err(|error| format!("Google Books request failed: {error}"))?;
 
         if !response.status().is_success() {
-            return Err(format!("Google Books returned HTTP {}", response.status().as_u16()));
+            return Err(format!(
+                "Google Books returned HTTP {}",
+                response.status().as_u16()
+            ));
         }
 
         let payload = response
@@ -69,7 +72,9 @@ impl GoogleBooksProvider {
 
         let raw_payload = serde_json::to_string(&first).unwrap_or_default();
         let volume_info = first.volume_info;
-        let published_at = volume_info.published_date.and_then(normalize_published_date);
+        let published_at = volume_info
+            .published_date
+            .and_then(normalize_published_date);
         let candidate = MetadataCandidate {
             title: volume_info.title,
             authors: volume_info.authors.unwrap_or_default(),
@@ -102,7 +107,9 @@ fn is_iso_date(value: &str) -> bool {
     parts[0].len() == 4
         && parts[1].len() == 2
         && parts[2].len() == 2
-        && parts.iter().all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+        && parts
+            .iter()
+            .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 impl MetadataProvider for GoogleBooksProvider {
@@ -114,7 +121,11 @@ impl MetadataProvider for GoogleBooksProvider {
         Box::pin(async move { self.query(format!("isbn:{isbn}"), 0.9).await })
     }
 
-    fn lookup_by_title_author<'a>(&'a self, title: &'a str, authors: &'a [String]) -> ProviderFuture<'a> {
+    fn lookup_by_title_author<'a>(
+        &'a self,
+        title: &'a str,
+        authors: &'a [String],
+    ) -> ProviderFuture<'a> {
         Box::pin(async move {
             let mut query = format!("intitle:{title}");
             if let Some(author) = authors.first() {

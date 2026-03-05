@@ -520,7 +520,10 @@ async fn get_import_job_result_loads_latest_job_when_job_id_is_omitted() {
 
     let import = start_import_with_pool(
         StartImportInput {
-            paths: vec![ok.to_string_lossy().to_string(), bad.to_string_lossy().to_string()],
+            paths: vec![
+                ok.to_string_lossy().to_string(),
+                bad.to_string_lossy().to_string(),
+            ],
         },
         &pool,
     )
@@ -560,7 +563,10 @@ async fn retry_reprocesses_only_failed_items_from_source_job() {
 
     let first = start_import_with_pool(
         StartImportInput {
-            paths: vec![ok.to_string_lossy().to_string(), bad.to_string_lossy().to_string()],
+            paths: vec![
+                ok.to_string_lossy().to_string(),
+                bad.to_string_lossy().to_string(),
+            ],
         },
         &pool,
     )
@@ -581,20 +587,17 @@ async fn retry_reprocesses_only_failed_items_from_source_job() {
 
     assert_eq!(retried.processed_count, 1);
     assert_eq!(retried.success_count, 1);
-    assert!(
-        retried
-            .items
-            .iter()
-            .all(|item| item.source_path.ends_with("retry-me.txt"))
-    );
+    assert!(retried
+        .items
+        .iter()
+        .all(|item| item.source_path.ends_with("retry-me.txt")));
 
-    let retry_source: Option<i64> = sqlx::query_scalar(
-        "SELECT retry_source_job_id FROM import_jobs WHERE id = ?",
-    )
-    .bind(retried.job_id)
-    .fetch_one(&pool)
-    .await
-    .expect("retry source should be queryable");
+    let retry_source: Option<i64> =
+        sqlx::query_scalar("SELECT retry_source_job_id FROM import_jobs WHERE id = ?")
+            .bind(retried.job_id)
+            .fetch_one(&pool)
+            .await
+            .expect("retry source should be queryable");
     assert_eq!(retry_source, Some(first.job_id));
 }
 
@@ -649,12 +652,10 @@ async fn retry_selected_subset_only_retries_requested_failed_paths() {
 
     assert_eq!(retried.processed_count, 1);
     assert_eq!(retried.success_count, 1);
-    assert!(
-        retried
-            .items
-            .iter()
-            .all(|item| item.source_path.ends_with("bad-a.txt"))
-    );
+    assert!(retried
+        .items
+        .iter()
+        .all(|item| item.source_path.ends_with("bad-a.txt")));
 }
 
 #[tokio::test]
@@ -695,11 +696,9 @@ async fn retry_fails_when_source_job_has_no_failed_items() {
     )
     .await;
 
-    assert!(
-        retry
-            .expect_err("retry should fail without failed items")
-            .contains("No failed items")
-    );
+    assert!(retry
+        .expect_err("retry should fail without failed items")
+        .contains("No failed items"));
 }
 
 #[tokio::test]
@@ -726,7 +725,10 @@ async fn retry_rejects_selection_with_non_failed_path() {
 
     let first = start_import_with_pool(
         StartImportInput {
-            paths: vec![ok.to_string_lossy().to_string(), bad.to_string_lossy().to_string()],
+            paths: vec![
+                ok.to_string_lossy().to_string(),
+                bad.to_string_lossy().to_string(),
+            ],
         },
         &pool,
     )
@@ -748,11 +750,9 @@ async fn retry_rejects_selection_with_non_failed_path() {
     )
     .await;
 
-    assert!(
-        retry
-            .expect_err("retry should reject ambiguous selections")
-            .contains("not failed in source job")
-    );
+    assert!(retry
+        .expect_err("retry should reject ambiguous selections")
+        .contains("not failed in source job"));
 }
 
 #[tokio::test]

@@ -10,6 +10,9 @@ use time::OffsetDateTime;
 pub mod ingest;
 pub mod library;
 pub mod metadata;
+pub mod metadata_batch;
+pub mod metadata_collections;
+pub mod metadata_conflicts;
 pub mod metadata_enrichment;
 pub mod providers;
 
@@ -262,6 +265,22 @@ async fn enrich_library_item_metadata(
 }
 
 #[tauri::command]
+async fn preview_batch_metadata_update(
+    input: metadata_batch::BatchMetadataUpdateInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_batch::BatchMetadataRunResult, String> {
+    metadata_batch::preview_batch_metadata_update_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn execute_batch_metadata_update(
+    input: metadata_batch::BatchMetadataUpdateInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_batch::BatchMetadataRunResult, String> {
+    metadata_batch::execute_batch_metadata_update_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
 async fn list_metadata_enrichment_proposals(
     input: metadata_enrichment::ListMetadataEnrichmentProposalsInput,
     state: State<'_, AppState>,
@@ -275,6 +294,60 @@ async fn apply_metadata_enrichment_proposal(
     state: State<'_, AppState>,
 ) -> Result<metadata_enrichment::ApplyMetadataEnrichmentProposalResult, String> {
     metadata_enrichment::apply_metadata_enrichment_proposal_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn assign_item_tags_collections(
+    input: metadata_collections::AssignItemTagsCollectionsInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_collections::AssignItemTagsCollectionsResult, String> {
+    metadata_collections::assign_item_tags_collections_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn list_item_tags_collections(
+    input: metadata_collections::ListItemTagsCollectionsInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_collections::ItemTagsCollections, String> {
+    metadata_collections::list_item_tags_collections_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn list_metadata_tags(
+    state: State<'_, AppState>,
+) -> Result<metadata_collections::ListMetadataNamesResult, String> {
+    metadata_collections::list_metadata_tags_with_pool(&state.pool).await
+}
+
+#[tauri::command]
+async fn list_metadata_collections(
+    state: State<'_, AppState>,
+) -> Result<metadata_collections::ListMetadataNamesResult, String> {
+    metadata_collections::list_metadata_collections_with_pool(&state.pool).await
+}
+
+#[tauri::command]
+async fn detect_metadata_conflicts(
+    input: metadata_conflicts::DetectMetadataConflictsInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_conflicts::DetectMetadataConflictsResult, String> {
+    metadata_conflicts::detect_metadata_conflicts_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn list_metadata_conflicts(
+    input: metadata_conflicts::ListMetadataConflictsInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_conflicts::ListMetadataConflictsResult, String> {
+    metadata_conflicts::list_metadata_conflicts_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn resolve_metadata_conflict(
+    input: metadata_conflicts::ResolveMetadataConflictInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_conflicts::ResolveMetadataConflictResult, String> {
+    metadata_conflicts::resolve_metadata_conflict_with_pool(input, &state.pool).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -297,9 +370,18 @@ pub fn run() {
             list_library_items,
             get_library_item_metadata,
             update_library_item_metadata,
+            preview_batch_metadata_update,
+            execute_batch_metadata_update,
             enrich_library_item_metadata,
             list_metadata_enrichment_proposals,
-            apply_metadata_enrichment_proposal
+            apply_metadata_enrichment_proposal,
+            assign_item_tags_collections,
+            list_item_tags_collections,
+            list_metadata_tags,
+            list_metadata_collections,
+            detect_metadata_conflicts,
+            list_metadata_conflicts,
+            resolve_metadata_conflict
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

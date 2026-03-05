@@ -132,7 +132,11 @@ async fn fallback_provider_used_when_primary_fails() {
 
     let primary = FakeProvider::new(
         "google_books",
-        vec![Err("timeout".to_string()), Err("timeout".to_string()), Err("timeout".to_string())],
+        vec![
+            Err("timeout".to_string()),
+            Err("timeout".to_string()),
+            Err("timeout".to_string()),
+        ],
         vec![],
     );
     let fallback = FakeProvider::new(
@@ -153,13 +157,11 @@ async fn fallback_provider_used_when_primary_fails() {
     assert_eq!(result.status, "degraded");
     assert_eq!(result.proposals.len(), 1);
     assert_eq!(result.proposals[0].provider, "open_library");
-    assert!(
-        result
-            .diagnostic
-            .as_deref()
-            .unwrap_or_default()
-            .contains("google_books")
-    );
+    assert!(result
+        .diagnostic
+        .as_deref()
+        .unwrap_or_default()
+        .contains("google_books"));
 }
 
 #[tokio::test]
@@ -174,7 +176,11 @@ async fn retry_exhaustion_marks_run_failed() {
 
     let primary = FakeProvider::new(
         "google_books",
-        vec![Err("timeout".to_string()), Err("timeout".to_string()), Err("timeout".to_string())],
+        vec![
+            Err("timeout".to_string()),
+            Err("timeout".to_string()),
+            Err("timeout".to_string()),
+        ],
         vec![],
     );
     let fallback = FakeProvider::new("open_library", vec![Ok(None)], vec![]);
@@ -267,14 +273,15 @@ async fn apply_proposal_updates_item_and_marks_applied() {
 
     assert_eq!(apply_result.item.title, "Enriched Title");
     assert_eq!(apply_result.item.language.as_deref(), Some("fr"));
-    assert_eq!(apply_result.item.published_at.as_deref(), Some("2024-12-31"));
+    assert_eq!(
+        apply_result.item.published_at.as_deref(),
+        Some("2024-12-31")
+    );
 
-    let refreshed = get_library_item_metadata_with_pool(
-        GetLibraryItemMetadataInput { item_id },
-        &pool,
-    )
-    .await
-    .expect("item should be loadable");
+    let refreshed =
+        get_library_item_metadata_with_pool(GetLibraryItemMetadataInput { item_id }, &pool)
+            .await
+            .expect("item should be loadable");
     assert_eq!(refreshed.title, "Enriched Title");
 
     let applied_at: Option<String> =
@@ -299,7 +306,11 @@ async fn failed_enrichment_for_one_item_does_not_block_another_item() {
 
     let failing_provider = FakeProvider::new(
         "google_books",
-        vec![Err("timeout".to_string()), Err("timeout".to_string()), Err("timeout".to_string())],
+        vec![
+            Err("timeout".to_string()),
+            Err("timeout".to_string()),
+            Err("timeout".to_string()),
+        ],
         vec![],
     );
     let empty_provider = FakeProvider::new("open_library", vec![Ok(None)], vec![]);
@@ -388,14 +399,19 @@ async fn apply_proposal_is_idempotent_and_rejects_second_apply() {
     .expect("enrichment should complete");
 
     let proposal_id = run.proposals[0].id;
-    apply_metadata_enrichment_proposal_with_pool(ApplyMetadataEnrichmentProposalInput { proposal_id }, &pool)
-        .await
-        .expect("first apply should succeed");
+    apply_metadata_enrichment_proposal_with_pool(
+        ApplyMetadataEnrichmentProposalInput { proposal_id },
+        &pool,
+    )
+    .await
+    .expect("first apply should succeed");
 
-    let second_apply =
-        apply_metadata_enrichment_proposal_with_pool(ApplyMetadataEnrichmentProposalInput { proposal_id }, &pool)
-            .await
-            .expect_err("second apply should fail");
+    let second_apply = apply_metadata_enrichment_proposal_with_pool(
+        ApplyMetadataEnrichmentProposalInput { proposal_id },
+        &pool,
+    )
+    .await
+    .expect_err("second apply should fail");
 
     assert!(second_apply.contains("already applied"));
 }

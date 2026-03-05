@@ -27,7 +27,11 @@ pub struct MetadataCandidate {
 pub trait MetadataProvider: Send + Sync {
     fn provider_name(&self) -> &'static str;
     fn lookup_by_isbn<'a>(&'a self, isbn: &'a str) -> ProviderFuture<'a>;
-    fn lookup_by_title_author<'a>(&'a self, title: &'a str, authors: &'a [String]) -> ProviderFuture<'a>;
+    fn lookup_by_title_author<'a>(
+        &'a self,
+        title: &'a str,
+        authors: &'a [String],
+    ) -> ProviderFuture<'a>;
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,7 +189,10 @@ fn map_enrichment_proposal_row(row: EnrichmentProposalRow) -> MetadataEnrichment
     }
 }
 
-async fn load_item_for_enrichment(item_id: i64, pool: &SqlitePool) -> Result<ItemLookupRow, String> {
+async fn load_item_for_enrichment(
+    item_id: i64,
+    pool: &SqlitePool,
+) -> Result<ItemLookupRow, String> {
     sqlx::query_as::<_, ItemLookupRow>(
         r#"
         SELECT id, title, authors, source_path
@@ -308,7 +315,10 @@ async fn complete_enrichment_run(
     Ok(())
 }
 
-async fn list_proposals_for_item(item_id: i64, pool: &SqlitePool) -> Result<Vec<MetadataEnrichmentProposal>, String> {
+async fn list_proposals_for_item(
+    item_id: i64,
+    pool: &SqlitePool,
+) -> Result<Vec<MetadataEnrichmentProposal>, String> {
     let rows = sqlx::query_as::<_, EnrichmentProposalRow>(
         r#"
         SELECT id, provider, confidence, title, authors, language, published_at, diagnostic, applied_at
@@ -464,7 +474,11 @@ pub async fn enrich_library_item_metadata_with_providers(
                 diagnostic: degraded_diagnostic.map(ToString::to_string),
                 applied_at: None,
             });
-            let status = if diagnostics.is_empty() { "success" } else { "degraded" };
+            let status = if diagnostics.is_empty() {
+                "success"
+            } else {
+                "degraded"
+            };
             let diagnostic = if diagnostics.is_empty() {
                 None
             } else {
@@ -518,6 +532,14 @@ pub async fn apply_metadata_enrichment_proposal_with_pool(
     input: ApplyMetadataEnrichmentProposalInput,
     pool: &SqlitePool,
 ) -> Result<ApplyMetadataEnrichmentProposalResult, String> {
+    let mut tx = pool.begin().await.map_err(|error| {
+        report_internal_error(
+            "Unable to start enrichment apply transaction",
+            &error,
+            "Unable to apply metadata enrichment proposal.",
+        )
+    })?;
+
     let proposal = sqlx::query_as::<_, ProposalApplyRow>(
         r#"
         SELECT id, library_item_id, title, authors, language, published_at, applied_at
@@ -527,7 +549,7 @@ pub async fn apply_metadata_enrichment_proposal_with_pool(
         "#,
     )
     .bind(input.proposal_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|error| {
         report_internal_error(
@@ -542,16 +564,16 @@ pub async fn apply_metadata_enrichment_proposal_with_pool(
         return Err("Metadata enrichment proposal already applied.".to_string());
     }
 
-    let current = metadata::get_library_item_metadata_with_pool(
+    let current = metadata::get_library_item_metadata_with_tx(
         metadata::GetLibraryItemMetadataInput {
             item_id: proposal.library_item_id,
         },
-        pool,
+        &mut tx,
     )
     .await?;
 
     let proposal_authors = parse_authors_json(&proposal.authors);
-    let updated_item = metadata::update_library_item_metadata_with_pool(
+    let updated_item = metadata::update_library_item_metadata_with_tx(
         metadata::UpdateLibraryItemMetadataInput {
             item_id: proposal.library_item_id,
             title: proposal.title.unwrap_or(current.title),
@@ -562,26 +584,40 @@ pub async fn apply_metadata_enrichment_proposal_with_pool(
             },
             language: proposal.language.or(current.language),
             published_at: proposal.published_at.or(current.published_at),
+            tags: None,
+            collections: None,
         },
-        pool,
+        &mut tx,
     )
     .await?;
 
     let applied_at = now_utc_rfc3339()?;
-    sqlx::query(
+    let mark_result = sqlx::query(
         r#"
         UPDATE metadata_enrichment_proposals
         SET applied_at = ?
-        WHERE id = ?
+        WHERE id = ? AND applied_at IS NULL
         "#,
     )
     .bind(applied_at)
     .bind(proposal.id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|error| {
         report_internal_error(
             "Unable to mark metadata enrichment proposal as applied",
+            &error,
+            "Unable to apply metadata enrichment proposal.",
+        )
+    })?;
+
+    if mark_result.rows_affected() != 1 {
+        return Err("Metadata enrichment proposal is no longer applicable.".to_string());
+    }
+
+    tx.commit().await.map_err(|error| {
+        report_internal_error(
+            "Unable to commit enrichment apply transaction",
             &error,
             "Unable to apply metadata enrichment proposal.",
         )
