@@ -15,6 +15,7 @@ pub mod metadata_collections;
 pub mod metadata_conflicts;
 pub mod metadata_enrichment;
 pub mod providers;
+pub mod search_index;
 
 #[derive(Clone)]
 struct AppState {
@@ -350,11 +351,46 @@ async fn resolve_metadata_conflict(
     metadata_conflicts::resolve_metadata_conflict_with_pool(input, &state.pool).await
 }
 
+#[tauri::command]
+async fn get_index_queue_status(
+    state: State<'_, AppState>,
+) -> Result<search_index::IndexQueueStatus, String> {
+    search_index::get_index_queue_status_with_pool(&state.pool).await
+}
+
+#[tauri::command]
+async fn process_index_work_queue(
+    input: search_index::ProcessIndexWorkQueueInput,
+    state: State<'_, AppState>,
+) -> Result<search_index::ProcessIndexWorkQueueResult, String> {
+    search_index::process_index_work_queue_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn retry_failed_index_work_units(
+    input: search_index::RetryFailedIndexWorkUnitsInput,
+    state: State<'_, AppState>,
+) -> Result<search_index::RetryFailedIndexWorkUnitsResult, String> {
+    search_index::retry_failed_index_work_units_with_pool(input.limit, &state.pool).await
+}
+
+#[tauri::command]
+async fn ensure_search_index_health(
+    state: State<'_, AppState>,
+) -> Result<search_index::EnsureIndexHealthResult, String> {
+    search_index::ensure_search_index_health_with_pool(&state.pool).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let pool = tauri::async_runtime::block_on(initialize_pool(app.handle()))?;
+            if let Err(error) = tauri::async_runtime::block_on(
+                search_index::ensure_search_index_health_on_startup_with_pool(&pool),
+            ) {
+                eprintln!("Search index health check failed during startup: {error}");
+            }
             app.manage(AppState { pool });
             Ok(())
         })
@@ -381,7 +417,11 @@ pub fn run() {
             list_metadata_collections,
             detect_metadata_conflicts,
             list_metadata_conflicts,
-            resolve_metadata_conflict
+            resolve_metadata_conflict,
+            get_index_queue_status,
+            process_index_work_queue,
+            retry_failed_index_work_units,
+            ensure_search_index_health
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

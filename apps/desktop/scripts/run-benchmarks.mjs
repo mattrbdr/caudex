@@ -1,5 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const outputPath = process.argv[2] ?? "benchmarks/latest.json";
 const resolvedOutput = path.resolve(process.cwd(), outputPath);
@@ -18,22 +22,43 @@ function percentile95(values) {
   return Number(sorted[index].toFixed(3));
 }
 
-function runSearchBenchmark() {
-  const corpus = Array.from({ length: 12000 }, (_, index) => {
-    const category = index % 7 === 0 ? "history" : "fiction";
-    return `book-${index}-caudex-${category}-metadata`;
-  });
-  const durationsMs = [];
+async function runSearchBenchmark() {
+  const { stdout } = await execFileAsync(
+    "cargo",
+    [
+      "run",
+      "--quiet",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--bin",
+      "search_benchmark",
+      "--",
+      "--corpus",
+      "2000",
+      "--queries",
+      "250",
+    ],
+    {
+      cwd: process.cwd(),
+      maxBuffer: 10 * 1024 * 1024,
+    },
+  );
 
-  for (let i = 0; i < 250; i += 1) {
-    const query = i % 5 === 0 ? "history" : `book-${i}`;
-    const start = process.hrtime.bigint();
-    corpus.filter((entry) => entry.includes(query));
-    const elapsedMs = Number(process.hrtime.bigint() - start) / 1_000_000;
-    durationsMs.push(elapsedMs);
+  const lines = stdout
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    throw new Error("No benchmark payload emitted by search_benchmark binary.");
   }
 
-  return percentile95(durationsMs);
+  const payload = JSON.parse(lines[lines.length - 1]);
+  const searchP95 = Number(payload.search_p95_ms);
+  if (!Number.isFinite(searchP95)) {
+    throw new Error("search_benchmark returned an invalid search_p95_ms.");
+  }
+
+  return Number(searchP95.toFixed(3));
 }
 
 const smokeReport = JSON.parse(await readFile(resolvedSmokeReport, "utf8"));
@@ -50,7 +75,7 @@ const startupP95Ms = percentile95(startupDurations);
 const memorySteadyMb = Number(
   (process.memoryUsage().heapUsed / (1024 * 1024)).toFixed(3),
 );
-const searchP95Ms = runSearchBenchmark();
+const searchP95Ms = await runSearchBenchmark();
 
 const benchmarkPayload = {
   generated_at: new Date().toISOString(),

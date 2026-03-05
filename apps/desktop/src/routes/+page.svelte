@@ -151,6 +151,33 @@
     item: LibraryItemMetadata;
   };
 
+  type IndexQueueStatus = {
+    queued_count: number;
+    running_count: number;
+    success_count: number;
+    failed_count: number;
+    retry_count: number;
+    recovered_count: number;
+    index_root: string;
+  };
+
+  type ProcessIndexWorkQueueResult = {
+    processed_count: number;
+    success_count: number;
+    failed_count: number;
+  };
+
+  type RetryFailedIndexWorkUnitsResult = {
+    marked_retry_count: number;
+  };
+
+  type EnsureIndexHealthResult = {
+    repair_performed: boolean;
+    rebuild_queued_count: number;
+    index_root: string;
+    diagnostic: string;
+  };
+
   const WORKSPACE_STATE_KEY = "caudex.workspace.v1";
 
   let isLoading = $state(true);
@@ -216,6 +243,13 @@
   let conflictStatusMessage = $state("");
   let isConflictsLoading = $state(false);
   let resolvingConflictId = $state<number | null>(null);
+
+  let indexQueueStatus = $state<IndexQueueStatus | null>(null);
+  let indexStatusMessage = $state("");
+  let isIndexStatusLoading = $state(false);
+  let isIndexProcessing = $state(false);
+  let isIndexRetrying = $state(false);
+  let isIndexRepairing = $state(false);
 
   let bulkDuplicateMode = $state<"skip_duplicate" | "merge_metadata" | "force_import">(
     "skip_duplicate",
@@ -358,6 +392,7 @@
         restoreWorkspaceState();
         await loadMetadataItems();
         await loadMetadataTaxonomyOptions();
+        await loadIndexQueueStatus();
       }
     } catch (error) {
       errorMessage =
@@ -419,6 +454,7 @@
           path: libraryPath,
         },
       });
+      await loadIndexQueueStatus();
       setWorkspaceStep("import");
     } catch (error) {
       errorMessage =
@@ -466,6 +502,7 @@
           paths,
         },
       });
+      await loadIndexQueueStatus();
       selectedRetryPaths = [];
     } catch (error) {
       importErrorMessage =
@@ -504,6 +541,7 @@
           dry_run: bulkDryRun,
         },
       });
+      await loadIndexQueueStatus();
       selectedRetryPaths = [];
     } catch (error) {
       importErrorMessage =
@@ -549,6 +587,7 @@
           source_paths: sourcePaths,
         },
       });
+      await loadIndexQueueStatus();
       selectedRetryPaths = [];
     } catch (error) {
       importErrorMessage =
@@ -582,6 +621,74 @@
       availableCollections = collectionsResult.names;
     } catch {
       // Keep UX non-blocking if taxonomy cannot be loaded.
+    }
+  }
+
+  async function loadIndexQueueStatus() {
+    isIndexStatusLoading = true;
+    try {
+      indexQueueStatus = await invoke<IndexQueueStatus>("get_index_queue_status");
+    } catch {
+      indexQueueStatus = null;
+    } finally {
+      isIndexStatusLoading = false;
+    }
+  }
+
+  async function processIndexQueue() {
+    isIndexProcessing = true;
+    indexStatusMessage = "";
+    try {
+      const result = await invoke<ProcessIndexWorkQueueResult>("process_index_work_queue", {
+        input: {
+          batch_size: 100,
+          include_failed: false,
+        },
+      });
+      indexStatusMessage = `Index queue processed: ${result.success_count} success, ${result.failed_count} failed.`;
+      await loadIndexQueueStatus();
+    } catch (error) {
+      indexStatusMessage =
+        error instanceof Error ? error.message : "Impossible de traiter la file d'index.";
+    } finally {
+      isIndexProcessing = false;
+    }
+  }
+
+  async function retryFailedIndexWorkUnits() {
+    isIndexRetrying = true;
+    indexStatusMessage = "";
+    try {
+      const result = await invoke<RetryFailedIndexWorkUnitsResult>(
+        "retry_failed_index_work_units",
+        {
+          input: {
+            limit: null,
+          },
+        },
+      );
+      indexStatusMessage = `${result.marked_retry_count} unité(s) marquée(s) pour retry.`;
+      await loadIndexQueueStatus();
+    } catch (error) {
+      indexStatusMessage =
+        error instanceof Error ? error.message : "Impossible de relancer les unités en échec.";
+    } finally {
+      isIndexRetrying = false;
+    }
+  }
+
+  async function ensureIndexHealth() {
+    isIndexRepairing = true;
+    indexStatusMessage = "";
+    try {
+      const result = await invoke<EnsureIndexHealthResult>("ensure_search_index_health");
+      indexStatusMessage = `${result.diagnostic} Rebuild queued: ${result.rebuild_queued_count}.`;
+      await loadIndexQueueStatus();
+    } catch (error) {
+      indexStatusMessage =
+        error instanceof Error ? error.message : "Impossible de vérifier la santé de l'index.";
+    } finally {
+      isIndexRepairing = false;
     }
   }
 
@@ -1754,6 +1861,41 @@
               <p class="text-sm text-slate-700"><span class="font-medium">Name:</span> {library.name}</p>
               <p class="text-sm text-slate-700"><span class="font-medium">Path:</span> {library.path}</p>
               <p class="text-sm text-slate-600">La création de la library se fait au premier démarrage. Les réglages se gèrent ici ensuite.</p>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <h3 class="text-lg font-semibold">Index queue</h3>
+                <Button type="button" variant="secondary" onclick={loadIndexQueueStatus} disabled={isIndexStatusLoading}>
+                  {#if isIndexStatusLoading}Chargement...{:else}Rafraîchir{/if}
+                </Button>
+              </div>
+
+              {#if indexQueueStatus}
+                <p class="text-sm text-slate-700"><span class="font-medium">Index root:</span> {indexQueueStatus.index_root || "-"}</p>
+                <p class="text-sm text-slate-700">
+                  queued: {indexQueueStatus.queued_count} · running: {indexQueueStatus.running_count} · success: {indexQueueStatus.success_count}
+                  · failed: {indexQueueStatus.failed_count} · retry: {indexQueueStatus.retry_count} · recovered: {indexQueueStatus.recovered_count}
+                </p>
+              {:else}
+                <p class="text-sm text-slate-600">Statut index indisponible.</p>
+              {/if}
+
+              <div class="mt-3 flex flex-wrap gap-2">
+                <Button type="button" onclick={processIndexQueue} disabled={isIndexProcessing}>
+                  {#if isIndexProcessing}Traitement...{:else}Traiter la file{/if}
+                </Button>
+                <Button type="button" variant="secondary" onclick={retryFailedIndexWorkUnits} disabled={isIndexRetrying}>
+                  {#if isIndexRetrying}Préparation...{:else}Retry failed{/if}
+                </Button>
+                <Button type="button" variant="secondary" onclick={ensureIndexHealth} disabled={isIndexRepairing}>
+                  {#if isIndexRepairing}Vérification...{:else}Vérifier/réparer l'index{/if}
+                </Button>
+              </div>
+
+              {#if indexStatusMessage}
+                <p class="mt-2 text-sm font-semibold text-amber-700">{indexStatusMessage}</p>
+              {/if}
             </div>
 
             <div class="rounded-xl border border-slate-200 bg-slate-50 p-4">

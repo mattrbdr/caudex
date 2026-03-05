@@ -3,10 +3,49 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use std::collections::HashSet;
 use std::fmt::Display;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 fn report_internal_error(context: &str, error: &dyn Display, user_message: &str) -> String {
     eprintln!("{context}: {error}");
     user_message.to_string()
+}
+
+fn now_utc_rfc3339() -> Result<String, String> {
+    OffsetDateTime::now_utc().format(&Rfc3339).map_err(|error| {
+        report_internal_error(
+            "Unable to format metadata timestamp",
+            &error,
+            "Unable to save metadata updates.",
+        )
+    })
+}
+
+async fn enqueue_index_refresh_with_tx(
+    item_id: i64,
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+) -> Result<(), String> {
+    let timestamp = now_utc_rfc3339()?;
+    sqlx::query(
+        r#"
+        INSERT INTO index_work_units (library_item_id, status, created_at, updated_at)
+        VALUES (?, 'queued', ?, ?)
+        "#,
+    )
+    .bind(item_id)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        report_internal_error(
+            "Unable to enqueue metadata-driven index refresh",
+            &error,
+            "Unable to save metadata updates.",
+        )
+    })?;
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -573,6 +612,8 @@ pub(crate) async fn update_library_item_metadata_with_tx(
     if update_result.rows_affected() == 0 {
         return Err("Library item not found.".to_string());
     }
+
+    enqueue_index_refresh_with_tx(input.item_id, tx).await?;
 
     if let Some(tags) = &tags {
         metadata_collections::replace_item_tags_with_tx(input.item_id, tags, tx).await?;

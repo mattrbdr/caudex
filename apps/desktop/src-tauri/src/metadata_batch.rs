@@ -506,15 +506,9 @@ async fn run_batch_execute(
         "failed".to_string()
     };
 
-    let run_row_id = persist_batch_run_with_executor(
-        &run_id,
-        mode,
-        &status,
-        &item_ids,
-        &patch,
-        &mut *tx,
-    )
-    .await?;
+    let run_row_id =
+        persist_batch_run_with_executor(&run_id, mode, &status, &item_ids, &patch, &mut *tx)
+            .await?;
     for outcome in &outcomes {
         persist_batch_outcome_with_executor(run_row_id, outcome, &mut *tx).await?;
     }

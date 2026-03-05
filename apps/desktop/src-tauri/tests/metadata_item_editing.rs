@@ -173,6 +173,15 @@ async fn update_metadata_succeeds_and_normalizes_authors() {
     );
     assert_eq!(updated.language.as_deref(), Some("fr"));
     assert_eq!(updated.published_at.as_deref(), Some("2024-12-31"));
+
+    let queued_units: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM index_work_units WHERE library_item_id = ? AND status = 'queued'",
+    )
+    .bind(item_id)
+    .fetch_one(&pool)
+    .await
+    .expect("index queue should be updated for metadata change");
+    assert_eq!(queued_units, 1);
 }
 
 #[tokio::test]

@@ -1303,13 +1303,15 @@ async fn process_one_file(
             INSERT INTO index_work_units (
               library_item_id,
               status,
-              created_at
+              created_at,
+              updated_at
             )
-            VALUES (?, ?, ?)
+            VALUES (?, ?, ?, ?)
             "#,
         )
         .bind(inserted_item_id)
         .bind("queued")
+        .bind(&created_at)
         .bind(&created_at)
         .execute(pool)
         .await

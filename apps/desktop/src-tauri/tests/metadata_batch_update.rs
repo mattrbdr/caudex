@@ -149,4 +149,13 @@ async fn execute_reports_partial_failures_and_persists_results() {
 
     assert_eq!(run_count, 1);
     assert_eq!(result_count, 2);
+
+    let queued_units: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM index_work_units WHERE library_item_id = ? AND status = 'queued'",
+    )
+    .bind(item_a)
+    .fetch_one(&pool)
+    .await
+    .expect("batch update should enqueue index refresh");
+    assert_eq!(queued_units, 1);
 }

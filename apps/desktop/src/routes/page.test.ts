@@ -69,6 +69,15 @@ function installLibraryReadyInvokeHandler(overrides?: Record<string, unknown>) {
     list_metadata_conflicts: { item_id: 12, conflicts: [] },
     list_metadata_tags: { names: ["to-read", "favorite"] },
     list_metadata_collections: { names: ["Classics", "Sci-Fi"] },
+    get_index_queue_status: {
+      queued_count: 1,
+      running_count: 0,
+      success_count: 0,
+      failed_count: 0,
+      retry_count: 0,
+      recovered_count: 0,
+      index_root: "/tmp/caudex-library/.caudex/search-index-v1",
+    },
     ...overrides,
   };
 
@@ -505,5 +514,48 @@ describe("workspace flow", () => {
     await fireEvent.keyDown(row, { key: "Enter" });
 
     expect(await screen.findByRole("heading", { name: /metadata editor/i })).toBeTruthy();
+  });
+
+  it("shows index queue status and can trigger index actions from settings", async () => {
+    installLibraryReadyInvokeHandler({
+      process_index_work_queue: {
+        processed_count: 1,
+        success_count: 1,
+        failed_count: 0,
+      },
+      retry_failed_index_work_units: {
+        marked_retry_count: 2,
+      },
+      ensure_search_index_health: {
+        repair_performed: true,
+        rebuild_queued_count: 1,
+        index_root: "/tmp/caudex-library/.caudex/search-index-v1",
+        diagnostic: "Search index repaired after corruption detection.",
+      },
+    });
+
+    render(Page);
+    await fireEvent.click(await screen.findByRole("button", { name: /^Settings$/i }));
+
+    expect(await screen.findByText(/index queue/i)).toBeTruthy();
+    expect(screen.getByText(/queued: 1/i)).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole("button", { name: /traiter la file/i }));
+    expect(invokeMock).toHaveBeenCalledWith("process_index_work_queue", {
+      input: {
+        batch_size: 100,
+        include_failed: false,
+      },
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: /retry failed/i }));
+    expect(invokeMock).toHaveBeenCalledWith("retry_failed_index_work_units", {
+      input: {
+        limit: null,
+      },
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: /vérifier\/réparer l'index/i }));
+    expect(invokeMock).toHaveBeenCalledWith("ensure_search_index_health");
   });
 });
