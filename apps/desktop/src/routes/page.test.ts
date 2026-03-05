@@ -152,4 +152,129 @@ describe("first-run library setup", () => {
       },
     });
   });
+
+  it("imports selected files and displays per-file outcomes", async () => {
+    invokeMock.mockResolvedValueOnce({
+      id: 1,
+      name: "Main Library",
+      path: "/tmp/caudex-library",
+      created_at: "2026-03-05T15:00:00Z",
+    });
+    openMock.mockResolvedValueOnce(["/tmp/good.epub", "/tmp/bad.txt"]);
+    invokeMock.mockResolvedValueOnce({
+      job_id: 77,
+      status: "partial_success",
+      processed_count: 2,
+      success_count: 1,
+      failed_count: 1,
+      skipped_count: 0,
+      items: [
+        {
+          source_path: "/tmp/good.epub",
+          status: "success",
+          format: "epub",
+          title: "good",
+          error_message: null,
+        },
+        {
+          source_path: "/tmp/bad.txt",
+          status: "failed",
+          format: null,
+          title: null,
+          error_message: "Unsupported file format.",
+        },
+      ],
+    });
+
+    render(Page);
+
+    const importButton = await screen.findByRole("button", {
+      name: /importer des fichiers/i,
+    });
+    await fireEvent.click(importButton);
+
+    expect(openMock).toHaveBeenNthCalledWith(1, {
+      directory: false,
+      multiple: true,
+      title: "Sélectionner des ebooks",
+      filters: [
+        {
+          name: "Ebooks",
+          extensions: ["epub", "mobi", "pdf"],
+        },
+      ],
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "start_import", {
+      input: {
+        paths: ["/tmp/good.epub", "/tmp/bad.txt"],
+      },
+    });
+
+    expect(await screen.findByText(/1 successful/i)).toBeTruthy();
+    expect(screen.getByText(/1 failed/i)).toBeTruthy();
+    expect(screen.getByText("/tmp/good.epub")).toBeTruthy();
+    expect(screen.getByText("/tmp/bad.txt")).toBeTruthy();
+    expect(screen.getByText("Unsupported file format.")).toBeTruthy();
+  });
+
+  it("imports a folder tree and shows duplicate decision diagnostics", async () => {
+    invokeMock.mockResolvedValueOnce({
+      id: 1,
+      name: "Main Library",
+      path: "/tmp/caudex-library",
+      created_at: "2026-03-05T15:00:00Z",
+    });
+    openMock.mockResolvedValueOnce("/tmp/library-tree");
+    invokeMock.mockResolvedValueOnce({
+      job_id: 88,
+      status: "partial_success",
+      scanned_count: 4,
+      processed_count: 4,
+      success_count: 2,
+      failed_count: 1,
+      skipped_count: 1,
+      items: [
+        {
+          source_path: "/tmp/library-tree/a.pdf",
+          status: "success",
+          format: "pdf",
+          title: "a",
+          error_message: null,
+          dedupe_decision: null,
+        },
+        {
+          source_path: "/tmp/library-tree/nested/b.pdf",
+          status: "skipped",
+          format: "pdf",
+          title: "b",
+          error_message: "Duplicate content detected and skipped.",
+          dedupe_decision: "skip_duplicate",
+        },
+      ],
+    });
+
+    render(Page);
+
+    const importFolderButton = await screen.findByRole("button", {
+      name: /importer un dossier/i,
+    });
+    await fireEvent.click(importFolderButton);
+
+    expect(openMock).toHaveBeenNthCalledWith(1, {
+      directory: true,
+      multiple: false,
+      title: "Sélectionner un dossier à importer",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "start_bulk_import", {
+      input: {
+        root_path: "/tmp/library-tree",
+        duplicate_mode: "skip_duplicate",
+        dry_run: false,
+      },
+    });
+
+    expect(await screen.findByText(/Scanned: 4/i)).toBeTruthy();
+    expect(screen.getByText(/Dedupe:/i)).toBeTruthy();
+    expect(screen.getByText("skip_duplicate")).toBeTruthy();
+  });
 });

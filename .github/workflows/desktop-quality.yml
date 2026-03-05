@@ -92,14 +92,7 @@ jobs:
         run: bun run ci:repro:prepare ../../artifacts/reproducibility
 
       - name: Generate checksums
-        run: |
-          node apps/desktop/scripts/checksum-artifacts.mjs generate \
-            artifacts/reproducibility/checksums.sha256 \
-            artifacts/reproducibility/package.json \
-            artifacts/reproducibility/bun.lock \
-            artifacts/reproducibility/Cargo.lock \
-            artifacts/reproducibility/frontend-index.html \
-            artifacts/reproducibility/backend-binary
+        run: node apps/desktop/scripts/checksum-artifacts.mjs generate artifacts/reproducibility/checksums.sha256 artifacts/reproducibility/package.json artifacts/reproducibility/bun.lock artifacts/reproducibility/Cargo.lock artifacts/reproducibility/frontend-index.html artifacts/reproducibility/backend-binary
 
       - name: Verify checksums
         run: node apps/desktop/scripts/checksum-artifacts.mjs verify artifacts/reproducibility/checksums.sha256

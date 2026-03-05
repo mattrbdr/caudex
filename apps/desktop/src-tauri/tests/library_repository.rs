@@ -35,6 +35,53 @@ async fn migrations_create_libraries_table() {
 }
 
 #[tokio::test]
+async fn migrations_create_import_tables() {
+    let temp = tempdir().expect("temp dir should be created");
+    let pool = setup_pool(temp.path().join("caudex.db")).await;
+
+    run_migrations(&pool)
+        .await
+        .expect("migrations should apply");
+
+    for table in [
+        "library_items",
+        "import_jobs",
+        "import_job_items",
+        "index_work_units",
+    ] {
+        let exists: Option<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_optional(&pool)
+        .await
+        .expect("table lookup should succeed");
+
+        assert!(exists.is_some(), "{table} table should exist");
+    }
+
+    let import_jobs_columns: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('import_jobs')")
+        .fetch_all(&pool)
+        .await
+        .expect("pragma should succeed");
+    let import_jobs_column_names: Vec<String> =
+        import_jobs_columns.into_iter().map(|(name,)| name).collect();
+    assert!(
+        import_jobs_column_names.iter().any(|name| name == "import_mode")
+            && import_jobs_column_names.iter().any(|name| name == "root_path")
+            && import_jobs_column_names
+                .iter()
+                .any(|name| name == "duplicate_mode")
+            && import_jobs_column_names.iter().any(|name| name == "dry_run")
+            && import_jobs_column_names
+                .iter()
+                .any(|name| name == "scanned_count"),
+        "import_jobs audit columns should exist"
+    );
+}
+
+#[tokio::test]
 async fn repository_can_create_and_read_library() {
     let temp = tempdir().expect("temp dir should be created");
     let pool = setup_pool(temp.path().join("caudex.db")).await;

@@ -8,6 +8,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 pub mod library;
+pub mod ingest;
 
 #[derive(Clone)]
 struct AppState {
@@ -193,6 +194,22 @@ async fn create_library(
     create_library_with_pool(input, &state.pool, |path| fs::create_dir_all(path)).await
 }
 
+#[tauri::command]
+async fn start_import(
+    input: ingest::StartImportInput,
+    state: State<'_, AppState>,
+) -> Result<ingest::ImportJobResult, String> {
+    ingest::start_import_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn start_bulk_import(
+    input: ingest::StartBulkImportInput,
+    state: State<'_, AppState>,
+) -> Result<ingest::ImportJobResult, String> {
+    ingest::start_bulk_import_with_pool(input, &state.pool).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -203,7 +220,12 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_library, create_library])
+        .invoke_handler(tauri::generate_handler![
+            get_library,
+            create_library,
+            start_import,
+            start_bulk_import
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
