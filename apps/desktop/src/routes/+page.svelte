@@ -43,6 +43,62 @@
     items: ImportFileResult[];
   };
 
+  type LibraryItemSummary = {
+    id: number;
+    title: string;
+    authors: string[];
+    language: string | null;
+    published_at: string | null;
+    format: string;
+    source_path: string;
+  };
+
+  type ListLibraryItemsResult = {
+    page: number;
+    page_size: number;
+    total: number;
+    items: LibraryItemSummary[];
+  };
+
+  type LibraryItemMetadata = {
+    id: number;
+    title: string;
+    authors: string[];
+    language: string | null;
+    published_at: string | null;
+    format: string;
+    source_path: string;
+  };
+
+  type MetadataEnrichmentProposal = {
+    id: number;
+    provider: string;
+    confidence: number;
+    title: string | null;
+    authors: string[];
+    language: string | null;
+    published_at: string | null;
+    diagnostic: string | null;
+    applied_at: string | null;
+  };
+
+  type ListMetadataEnrichmentProposalsResult = {
+    item_id: number;
+    proposals: MetadataEnrichmentProposal[];
+  };
+
+  type EnrichmentRunResult = {
+    run_id: number;
+    status: string;
+    diagnostic: string | null;
+    proposals: MetadataEnrichmentProposal[];
+  };
+
+  type ApplyMetadataEnrichmentProposalResult = {
+    proposal_id: number;
+    item: LibraryItemMetadata;
+  };
+
   let isLoading = $state(true);
   let isSubmitting = $state(false);
   let isPickingLocation = $state(false);
@@ -56,6 +112,23 @@
   let isRetrying = $state(false);
   let latestImport = $state<ImportJobResult | null>(null);
   let selectedRetryPaths = $state<string[]>([]);
+  let metadataItems = $state<LibraryItemSummary[]>([]);
+  let selectedMetadataItemId = $state<number | null>(null);
+  let metadataDetail = $state<LibraryItemMetadata | null>(null);
+  let metadataTitle = $state("");
+  let metadataAuthors = $state("");
+  let metadataLanguage = $state("");
+  let metadataPublishedAt = $state("");
+  let metadataErrorMessage = $state("");
+  let metadataSuccessMessage = $state("");
+  let isMetadataListLoading = $state(false);
+  let isMetadataDetailLoading = $state(false);
+  let isMetadataSaving = $state(false);
+  let isMetadataEnriching = $state(false);
+  let isMetadataProposalsLoading = $state(false);
+  let applyingProposalId = $state<number | null>(null);
+  let metadataEnrichmentProposals = $state<MetadataEnrichmentProposal[]>([]);
+  let metadataEnrichmentStatus = $state("");
   let bulkDuplicateMode = $state<"skip_duplicate" | "merge_metadata" | "force_import">(
     "skip_duplicate",
   );
@@ -289,6 +362,251 @@
     }
   }
 
+  async function loadMetadataItems() {
+    isMetadataListLoading = true;
+    metadataErrorMessage = "";
+    metadataSuccessMessage = "";
+
+    try {
+      const result = await invoke<ListLibraryItemsResult>("list_library_items", {
+        input: {
+          page: 1,
+          page_size: 50,
+        },
+      });
+
+      metadataItems = result.items;
+      if (result.items.length === 0) {
+        selectedMetadataItemId = null;
+        metadataDetail = null;
+        return;
+      }
+
+      selectedMetadataItemId = result.items[0].id;
+      await loadMetadataItemDetails(result.items[0].id);
+    } catch (error) {
+      metadataErrorMessage =
+        error instanceof Error
+          ? error.message
+          : "Impossible de charger la liste des métadonnées.";
+    } finally {
+      isMetadataListLoading = false;
+    }
+  }
+
+  async function loadMetadataItemDetails(itemId: number) {
+    isMetadataDetailLoading = true;
+    metadataErrorMessage = "";
+    metadataSuccessMessage = "";
+
+    try {
+      const item = await invoke<LibraryItemMetadata>("get_library_item_metadata", {
+        input: {
+          item_id: itemId,
+        },
+      });
+
+      metadataDetail = item;
+      metadataTitle = item.title;
+      metadataAuthors = item.authors.join(", ");
+      metadataLanguage = item.language ?? "";
+      metadataPublishedAt = item.published_at ?? "";
+      await loadMetadataEnrichmentProposals(item.id);
+    } catch (error) {
+      metadataErrorMessage =
+        error instanceof Error
+          ? error.message
+          : "Impossible de charger les détails metadata.";
+    } finally {
+      isMetadataDetailLoading = false;
+    }
+  }
+
+  async function loadMetadataEnrichmentProposals(itemId: number) {
+    isMetadataProposalsLoading = true;
+    metadataEnrichmentStatus = "";
+    try {
+      const result = await invoke<ListMetadataEnrichmentProposalsResult>(
+        "list_metadata_enrichment_proposals",
+        {
+          input: {
+            item_id: itemId,
+          },
+        },
+      );
+      metadataEnrichmentProposals = result.proposals;
+    } catch (error) {
+      metadataEnrichmentStatus =
+        error instanceof Error
+          ? error.message
+          : "Impossible de charger les propositions d'enrichissement.";
+    } finally {
+      isMetadataProposalsLoading = false;
+    }
+  }
+
+  async function onMetadataItemChange(event: Event) {
+    const selectedValue = Number((event.currentTarget as HTMLSelectElement).value);
+    if (!Number.isFinite(selectedValue)) {
+      return;
+    }
+
+    selectedMetadataItemId = selectedValue;
+    await loadMetadataItemDetails(selectedValue);
+  }
+
+  function parseMetadataAuthors(value: string): string[] {
+    return value
+      .split(/[\n,]/g)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+
+  function resetMetadataEdits() {
+    if (!metadataDetail) {
+      return;
+    }
+
+    metadataTitle = metadataDetail.title;
+    metadataAuthors = metadataDetail.authors.join(", ");
+    metadataLanguage = metadataDetail.language ?? "";
+    metadataPublishedAt = metadataDetail.published_at ?? "";
+    metadataErrorMessage = "";
+    metadataEnrichmentStatus = "";
+    metadataSuccessMessage = "Modifications annulées.";
+  }
+
+  async function saveMetadataEdits() {
+    if (!selectedMetadataItemId) {
+      metadataErrorMessage = "Sélectionnez un item avant d'enregistrer.";
+      return;
+    }
+
+    isMetadataSaving = true;
+    metadataErrorMessage = "";
+    metadataSuccessMessage = "";
+
+    try {
+      const updated = await invoke<LibraryItemMetadata>("update_library_item_metadata", {
+        input: {
+          item_id: selectedMetadataItemId,
+          title: metadataTitle,
+          authors: parseMetadataAuthors(metadataAuthors),
+          language: metadataLanguage.trim() === "" ? null : metadataLanguage.trim(),
+          published_at: metadataPublishedAt.trim() === "" ? null : metadataPublishedAt.trim(),
+        },
+      });
+
+      metadataDetail = updated;
+      metadataTitle = updated.title;
+      metadataAuthors = updated.authors.join(", ");
+      metadataLanguage = updated.language ?? "";
+      metadataPublishedAt = updated.published_at ?? "";
+      metadataSuccessMessage = "Metadata enregistrée.";
+      metadataItems = metadataItems.map((item) =>
+        item.id === updated.id
+          ? {
+              ...item,
+              title: updated.title,
+              authors: updated.authors,
+              language: updated.language,
+              published_at: updated.published_at,
+            }
+          : item,
+      );
+    } catch (error) {
+      metadataErrorMessage =
+        error instanceof Error
+          ? error.message
+          : "Impossible d'enregistrer les métadonnées.";
+    } finally {
+      isMetadataSaving = false;
+    }
+  }
+
+  async function enrichMetadataForSelectedItem() {
+    if (!selectedMetadataItemId) {
+      metadataEnrichmentStatus = "Sélectionnez un item avant de lancer l'enrichissement.";
+      return;
+    }
+
+    isMetadataEnriching = true;
+    metadataEnrichmentStatus = "";
+    metadataErrorMessage = "";
+    metadataSuccessMessage = "";
+    try {
+      const result = await invoke<EnrichmentRunResult>("enrich_library_item_metadata", {
+        input: {
+          item_id: selectedMetadataItemId,
+        },
+      });
+      metadataEnrichmentProposals = result.proposals;
+      if (result.status === "failed") {
+        metadataEnrichmentStatus =
+          result.diagnostic ?? "Aucune proposition d'enrichissement disponible.";
+      } else {
+        metadataEnrichmentStatus =
+          result.diagnostic ??
+          `Enrichissement terminé (${result.status}) avec ${result.proposals.length} proposition(s).`;
+      }
+    } catch (error) {
+      metadataEnrichmentStatus =
+        error instanceof Error
+          ? error.message
+          : "Impossible de lancer l'enrichissement metadata.";
+    } finally {
+      isMetadataEnriching = false;
+    }
+  }
+
+  async function applyMetadataEnrichmentProposal(proposalId: number) {
+    if (!selectedMetadataItemId) {
+      metadataEnrichmentStatus = "Sélectionnez un item avant d'appliquer une proposition.";
+      return;
+    }
+
+    applyingProposalId = proposalId;
+    metadataEnrichmentStatus = "";
+    metadataErrorMessage = "";
+    metadataSuccessMessage = "";
+    try {
+      const result = await invoke<ApplyMetadataEnrichmentProposalResult>(
+        "apply_metadata_enrichment_proposal",
+        {
+          input: {
+            proposal_id: proposalId,
+          },
+        },
+      );
+
+      metadataDetail = result.item;
+      metadataTitle = result.item.title;
+      metadataAuthors = result.item.authors.join(", ");
+      metadataLanguage = result.item.language ?? "";
+      metadataPublishedAt = result.item.published_at ?? "";
+      metadataSuccessMessage = "Proposition appliquée avec succès.";
+      await loadMetadataEnrichmentProposals(selectedMetadataItemId);
+      metadataItems = metadataItems.map((item) =>
+        item.id === result.item.id
+          ? {
+              ...item,
+              title: result.item.title,
+              authors: result.item.authors,
+              language: result.item.language,
+              published_at: result.item.published_at,
+            }
+          : item,
+      );
+    } catch (error) {
+      metadataEnrichmentStatus =
+        error instanceof Error
+          ? error.message
+          : "Impossible d'appliquer la proposition.";
+    } finally {
+      applyingProposalId = null;
+    }
+  }
+
   onMount(() => {
     void setSuggestedLibraryPath();
     void loadLibraryState();
@@ -363,6 +681,182 @@
                 Dry run
               </label>
             </div>
+
+            <section class="space-y-3 rounded-lg border p-3">
+              <h3 class="font-semibold">Single-item metadata editing</h3>
+              <div class="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onclick={loadMetadataItems}
+                  disabled={isMetadataListLoading}
+                >
+                  {#if isMetadataListLoading}
+                    Chargement...
+                  {:else}
+                    Charger les métadonnées
+                  {/if}
+                </Button>
+              </div>
+
+              <div class="space-y-2">
+                <Label for="metadata-item-select">Metadata item</Label>
+                <select
+                  id="metadata-item-select"
+                  class="border-input bg-background ring-offset-background flex h-10 w-full rounded-md border px-3 py-2 text-sm"
+                  disabled={metadataItems.length === 0 || isMetadataDetailLoading}
+                  onchange={onMetadataItemChange}
+                  value={selectedMetadataItemId ?? ""}
+                >
+                  {#if metadataItems.length === 0}
+                    <option value="">No metadata item loaded</option>
+                  {:else}
+                    {#each metadataItems as item}
+                      <option value={item.id}>{item.title} (#{item.id})</option>
+                    {/each}
+                  {/if}
+                </select>
+              </div>
+
+              <div class="grid gap-3 sm:grid-cols-2">
+                <div class="space-y-1 sm:col-span-2">
+                  <Label for="metadata-title">Metadata title</Label>
+                  <Input id="metadata-title" bind:value={metadataTitle} disabled={!metadataDetail} />
+                </div>
+                <div class="space-y-1 sm:col-span-2">
+                  <Label for="metadata-authors">Metadata authors</Label>
+                  <Input
+                    id="metadata-authors"
+                    bind:value={metadataAuthors}
+                    disabled={!metadataDetail}
+                    placeholder="Alice, Bob"
+                  />
+                </div>
+                <div class="space-y-1">
+                  <Label for="metadata-language">Metadata language</Label>
+                  <Input id="metadata-language" bind:value={metadataLanguage} disabled={!metadataDetail} />
+                </div>
+                <div class="space-y-1">
+                  <Label for="metadata-published-at">Metadata published date</Label>
+                  <Input
+                    id="metadata-published-at"
+                    bind:value={metadataPublishedAt}
+                    disabled={!metadataDetail}
+                    placeholder="YYYY-MM-DD"
+                  />
+                </div>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  onclick={saveMetadataEdits}
+                  disabled={!metadataDetail || isMetadataSaving}
+                >
+                  {#if isMetadataSaving}
+                    Enregistrement...
+                  {:else}
+                    Enregistrer metadata
+                  {/if}
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onclick={resetMetadataEdits}
+                  disabled={!metadataDetail || isMetadataSaving}
+                >
+                  Annuler modifications
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onclick={enrichMetadataForSelectedItem}
+                  disabled={!metadataDetail || isMetadataEnriching}
+                >
+                  {#if isMetadataEnriching}
+                    Enrichissement...
+                  {:else}
+                    Enrichir metadata
+                  {/if}
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onclick={() =>
+                    selectedMetadataItemId
+                      ? loadMetadataEnrichmentProposals(selectedMetadataItemId)
+                      : Promise.resolve()}
+                  disabled={!metadataDetail || isMetadataProposalsLoading}
+                >
+                  {#if isMetadataProposalsLoading}
+                    Rechargement...
+                  {:else}
+                    Recharger propositions
+                  {/if}
+                </Button>
+              </div>
+
+              {#if metadataErrorMessage}
+                <p class="text-sm font-semibold text-red-700" role="alert">{metadataErrorMessage}</p>
+              {/if}
+              {#if metadataSuccessMessage}
+                <p class="text-sm font-semibold text-emerald-700">{metadataSuccessMessage}</p>
+              {/if}
+              {#if metadataEnrichmentStatus}
+                <p class="text-sm font-semibold text-amber-700">{metadataEnrichmentStatus}</p>
+              {/if}
+
+              <div class="space-y-2 rounded-md border p-3">
+                <h4 class="font-semibold">Metadata enrichment proposals</h4>
+                {#if metadataEnrichmentProposals.length === 0}
+                  <p class="text-sm text-muted-foreground">No proposal yet.</p>
+                {:else}
+                  <ul class="space-y-2">
+                    {#each metadataEnrichmentProposals as proposal}
+                      <li class="rounded border p-2 text-sm">
+                        <p><span class="font-medium">Provider:</span> {proposal.provider}</p>
+                        <p><span class="font-medium">Confidence:</span> {proposal.confidence.toFixed(2)}</p>
+                        {#if proposal.title}
+                          <p><span class="font-medium">Title:</span> {proposal.title}</p>
+                        {/if}
+                        {#if proposal.authors.length > 0}
+                          <p><span class="font-medium">Authors:</span> {proposal.authors.join(", ")}</p>
+                        {/if}
+                        {#if proposal.language}
+                          <p><span class="font-medium">Language:</span> {proposal.language}</p>
+                        {/if}
+                        {#if proposal.published_at}
+                          <p><span class="font-medium">Published:</span> {proposal.published_at}</p>
+                        {/if}
+                        {#if proposal.diagnostic}
+                          <p class="text-amber-700">
+                            <span class="font-medium">Diagnostic:</span> {proposal.diagnostic}
+                          </p>
+                        {/if}
+                        {#if proposal.applied_at}
+                          <p class="text-emerald-700">
+                            <span class="font-medium">Applied at:</span> {proposal.applied_at}
+                          </p>
+                        {:else}
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            onclick={() => applyMetadataEnrichmentProposal(proposal.id)}
+                            disabled={applyingProposalId === proposal.id}
+                          >
+                            {#if applyingProposalId === proposal.id}
+                              Application...
+                            {:else}
+                              Appliquer proposition
+                            {/if}
+                          </Button>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            </section>
 
             {#if importErrorMessage}
               <p class="text-sm font-semibold text-red-700" role="alert">{importErrorMessage}</p>

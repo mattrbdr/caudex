@@ -33,8 +33,8 @@ copied.push(await copyRequired("src-tauri/Cargo.lock", "Cargo.lock"));
 copied.push(await copyRequired("build/index.html", "frontend-index.html"));
 
 const backendCandidates = [
-  "src-tauri/target/release/appsdesktop",
-  "src-tauri/target/release/appsdesktop.exe",
+  "src-tauri/target/release/caudex",
+  "src-tauri/target/release/caudex.exe",
 ];
 
 let backendSource = null;
@@ -47,7 +47,7 @@ for (const candidate of backendCandidates) {
 }
 
 if (!backendSource) {
-  throw new Error("No backend release binary found (appsdesktop or appsdesktop.exe).");
+  throw new Error("No backend release binary found (caudex or caudex.exe).");
 }
 
 const backendTarget = path.join(outputDir, "backend-binary");

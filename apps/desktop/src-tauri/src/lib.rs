@@ -9,6 +9,9 @@ use time::OffsetDateTime;
 
 pub mod ingest;
 pub mod library;
+pub mod metadata;
+pub mod metadata_enrichment;
+pub mod providers;
 
 #[derive(Clone)]
 struct AppState {
@@ -226,6 +229,54 @@ async fn start_import_retry(
     ingest::start_import_retry_with_pool(input, &state.pool).await
 }
 
+#[tauri::command]
+async fn list_library_items(
+    input: metadata::ListLibraryItemsInput,
+    state: State<'_, AppState>,
+) -> Result<metadata::ListLibraryItemsResult, String> {
+    metadata::list_library_items_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn get_library_item_metadata(
+    input: metadata::GetLibraryItemMetadataInput,
+    state: State<'_, AppState>,
+) -> Result<metadata::LibraryItemMetadata, String> {
+    metadata::get_library_item_metadata_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn update_library_item_metadata(
+    input: metadata::UpdateLibraryItemMetadataInput,
+    state: State<'_, AppState>,
+) -> Result<metadata::LibraryItemMetadata, String> {
+    metadata::update_library_item_metadata_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn enrich_library_item_metadata(
+    input: metadata_enrichment::EnrichLibraryItemMetadataInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_enrichment::EnrichmentRunResult, String> {
+    metadata_enrichment::enrich_library_item_metadata_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn list_metadata_enrichment_proposals(
+    input: metadata_enrichment::ListMetadataEnrichmentProposalsInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_enrichment::ListMetadataEnrichmentProposalsResult, String> {
+    metadata_enrichment::list_metadata_enrichment_proposals_with_pool(input, &state.pool).await
+}
+
+#[tauri::command]
+async fn apply_metadata_enrichment_proposal(
+    input: metadata_enrichment::ApplyMetadataEnrichmentProposalInput,
+    state: State<'_, AppState>,
+) -> Result<metadata_enrichment::ApplyMetadataEnrichmentProposalResult, String> {
+    metadata_enrichment::apply_metadata_enrichment_proposal_with_pool(input, &state.pool).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -242,7 +293,13 @@ pub fn run() {
             start_import,
             start_bulk_import,
             get_import_job_result,
-            start_import_retry
+            start_import_retry,
+            list_library_items,
+            get_library_item_metadata,
+            update_library_item_metadata,
+            enrich_library_item_metadata,
+            list_metadata_enrichment_proposals,
+            apply_metadata_enrichment_proposal
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
